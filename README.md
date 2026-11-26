@@ -52,14 +52,14 @@ Use the ❄︎ in the menu bar to pause, pick light, medium or heavy snow, switc
 
 ## Windows version 🪟 (beta)
 
-You asked for it, so here it is! Snow falls on your Windows desktop and piles up on your windows and the taskbar, and dragging a window still sends it flying. Snowballs and snowmen are coming soon ⛄
+You asked for it, so here it is! Snow falls on your Windows desktop and piles up on your windows and the taskbar. Everything from the Mac version is here too: drag a window to send the snow flying, roll and push snowballs, carry them around, stack three into a snowman, and hang fairy lights ✨
 
 ```sh
 cd WINTER_IS_COMING/windows
 dotnet run -c Release
 ```
 
-Use the ❄ icon in the system tray to pause, pick the snow amount, clear the snow, or quit. You'll need the [.NET 8 SDK](https://dotnet.microsoft.com/download) (`winget install Microsoft.DotNet.SDK.8`).
+Use the ❄ icon in the system tray to pause, pick the snow amount, switch the fairy lights on, clear the snow, see how to play, or quit. You'll need the [.NET 8 SDK](https://dotnet.microsoft.com/download) (`winget install Microsoft.DotNet.SDK.8`).
 
 ## Make it yours 🎨
 
