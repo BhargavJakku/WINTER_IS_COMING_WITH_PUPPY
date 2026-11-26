@@ -46,13 +46,13 @@ zsh build.sh
 
 Use the ❄︎ in the menu bar to pause, pick light, medium or heavy snow, switch the fairy lights on, clear the snow, or quit.
 
-- No `swiftc`? Run `xcode-select --install` first.
-- Want snow on the Dock too? Turn on **WinterIsComing** (or **Terminal**, if you run it with `build.sh`) in System Settings → Privacy & Security → Accessibility.
-- Want your own `.app`? Run `zsh make_app.sh 1.0`.
+- Run `xcode-select --install` first if you don't have `swiftc`.
+- Snow on the Dock: Turn on **WinterIsComing** (or **Terminal**, if you run it with `build.sh`) in System Settings → Privacy & Security → Accessibility.
+- Run `zsh make_app.sh 1.0` for your own `.app`
 
 ## Windows version 🪟 (beta)
 
-You asked for it, so here it is! Snow falls on your Windows desktop and piles up on your windows and the taskbar. Everything from the Mac version is here too: drag a window to send the snow flying, roll and push snowballs, carry them around, stack three into a snowman, and hang fairy lights ✨
+Snow falls on your Windows desktop. Everything from the Mac version is here too: drag a window to send the snow flying, roll and push snowballs, carry them around, stack three into a snowman, and hang fairy lights ✨
 
 1. Grab `WinterIsComing-windows-vX-beta.zip` from [the Windows release](https://github.com/yike-shi/WINTER_IS_COMING/releases/tag/windows-v0.1) (not the "Source code" ones)
 2. Unzip it and double-click **WinterIsComing.exe**
@@ -60,11 +60,7 @@ You asked for it, so here it is! Snow falls on your Windows desktop and piles up
 
 Use the ❄ icon in the system tray (bottom right, click **^** if you don't see it) to pause, pick the snow amount, switch the fairy lights on, clear the snow, see how to play, or quit.
 
-Want to run it from the code instead? Install the [.NET 8 SDK](https://dotnet.microsoft.com/download), then run `dotnet run -c Release` in the `windows` folder.
-
-## Make it yours 🎨
-
-Every setting lives at the top of `WinterIsComing.swift` (`enum Cfg`): how many flakes fall, how fast they fall, how tall the piles get, how big a snowball can grow… Change a number and run `zsh build.sh` again.
+Install the [.NET 8 SDK](https://dotnet.microsoft.com/download), to run it from the code instead.
 
 ## License
 
