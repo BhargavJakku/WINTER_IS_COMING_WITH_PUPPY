@@ -1,66 +1,58 @@
-#           ❄︎ WinterIsComing ❄︎
+# ❄︎ WinterIsComing
 
-Let it snow on your Mac! ☃️
-
-Snow falls on your desktop and piles up on your windows and Dock. Roll it into snowballs and build a little snowman. It's all one Swift file, and every flake is drawn in code.
+Quiet snowfall for your desktop, on Mac and Windows. Snow settles on your windows, the Dock and the taskbar, and you can roll it into snowballs and build a small snowman ☃️
 
 <!-- ![demo](docs/demo.gif) -->
 
-## What it can do ✨
+## Download
 
-- **Cozy snowfall**: three layers of flakes (near, middle and far) drifting in a gentle wind
-- **Snow piles up** on top of your windows, along the Dock and at the bottom of the screen
-- **Drag a window and *whoosh*!** The snow flies off. The faster you drag, the farther it goes
-- **Roll snowballs** just by moving your mouse sideways over the snow (no clicking!). They grow as they roll
-- **Snowballs push each other** along, and one that's pushed off the edge falls down
-- **Hold a snowball** with the left mouse button and carry it anywhere
-- **Stack three snowballs** and they turn into a snowman with a carrot nose and a red scarf
-- **A falling snowball goes *poof*** into a soft heap of snow, ready to be rolled again
-- **Fairy lights**: colorful twinkling lights that swing into place along the top of your windows. They're off by default, so turn them on from the ❄︎ menu (or press `L`)
+| | |
+|---|---|
+| **Mac** | [WinterIsComing-mac-v1.0.zip](https://github.com/yike-shi/WINTER_IS_COMING/releases/latest) · unzip, move it to Applications, open it |
+| **Windows** (beta) | [WinterIsComing-windows-v0.1-beta.zip](https://github.com/yike-shi/WINTER_IS_COMING/releases/tag/windows-v0.1) · unzip, open `WinterIsComing.exe` |
 
-## How to play 🎮
+On the release page, download the zip with the app's name, not the "Source code" files.
 
-- **Roll a snowball**: slide your mouse sideways over snow on a window, the Dock or the ground
-- **Push it**: roll one snowball into another and it gets shoved along
+**The first time you open it**, your computer may stop it, because the app isn't signed with a paid developer account yet:
+
+- **Mac**: click **Done**, then go to **System Settings → Privacy & Security** and click **Open Anyway**. You only need to do this once.
+- **Windows**: click **More info → Run anyway**.
+
+The app doesn't connect to the internet, and all of its code is in this repository.
+
+## What you can do
+
+- **Watch it snow**: flakes drift down in three layers and pile up on your windows
+- **Drag a window**: the snow on top slides off
+- **Roll a snowball**: move your mouse sideways over the snow
+- **Push it**: roll one snowball into another
 - **Carry it**: hold the left mouse button on a snowball and drag
-- **Build a snowman**: stack three snowballs on top of each other ⛄
-- **Make it fly**: drag a window and watch the snow whoosh off
-- **Hang the lights**: ❄︎ menu → **Fairy Lights** ✨
-- **Forgot something?** ❄︎ menu → **How to Play**
+- **Build a snowman**: stack three snowballs
+- **Hang fairy lights**: turn them on from the menu ✨
 
-## Download 🎁
+Everything else is in the ❄︎ menu: in the menu bar on Mac, in the system tray on Windows (click **^** if you don't see it). There you can pause, change the amount of snow, clear it, or see how to play again.
 
-1. Grab `WinterIsComing-mac-vX.zip` from [Releases](https://github.com/yike-shi/WINTER_IS_COMING/releases/latest) (not the "Source code" ones)
-2. Unzip it and drag **WinterIsComing** into your Applications folder
-3. Double-click it. The first time, macOS will say it can't open the app. Click **Done**, then go to **System Settings → Privacy & Security**, scroll down and click **Open Anyway**. You only need to do this once ✨
+On Mac, to get snow on the Dock too, allow **WinterIsComing** in System Settings → Privacy & Security → Accessibility.
 
-> 🙏 **Why does macOS block it?** This is an early version, and it isn't signed with a paid Apple Developer account yet, so macOS doesn't recognize it. It's not a virus, promise! The app never connects to the internet, and all the code is right here for you to read. Thanks for your patience while I work on it 💙
+## Build from source
 
-## Build it yourself 🛠️
+**Mac** (needs `swiftc`; run `xcode-select --install` if you don't have it)
 
 ```sh
 git clone https://github.com/yike-shi/WINTER_IS_COMING.git
 cd WINTER_IS_COMING
-zsh build.sh
+zsh build.sh            # run it
+zsh make_app.sh 1.0     # or package it as an .app
 ```
 
-Use the ❄︎ in the menu bar to pause, pick light, medium or heavy snow, switch the fairy lights on, clear the snow, or quit.
+**Windows** (needs the [.NET 8 SDK](https://dotnet.microsoft.com/download))
 
-- Run `xcode-select --install` first if you don't have `swiftc`.
-- Snow on the Dock: Turn on **WinterIsComing** (or **Terminal**, if you run it with `build.sh`) in System Settings → Privacy & Security → Accessibility.
-- Run `zsh make_app.sh 1.0` for your own `.app`
+```sh
+cd WINTER_IS_COMING/windows
+dotnet run -c Release
+```
 
-## Windows version 🪟 (beta)
-
-Snow falls on your Windows desktop. Everything from the Mac version is here too: drag a window to send the snow flying, roll and push snowballs, carry them around, stack three into a snowman, and hang fairy lights ✨
-
-1. Grab `WinterIsComing-windows-vX-beta.zip` from [the Windows release](https://github.com/yike-shi/WINTER_IS_COMING/releases/tag/windows-v0.1) (not the "Source code" ones)
-2. Unzip it and double-click **WinterIsComing.exe**
-3. If Windows says "Windows protected your PC", click **More info → Run anyway**. It's a tiny indie app without a paid signature, so Windows doesn't recognize it yet 💙
-
-Use the ❄ icon in the system tray (bottom right, click **^** if you don't see it) to pause, pick the snow amount, switch the fairy lights on, clear the snow, see how to play, or quit.
-
-Install the [.NET 8 SDK](https://dotnet.microsoft.com/download), to run it from the code instead.
+All the settings (how much snow falls, how fast, how big a snowball can get) are at the top of `WinterIsComing.swift` and `windows/Program.cs`.
 
 ## License
 
