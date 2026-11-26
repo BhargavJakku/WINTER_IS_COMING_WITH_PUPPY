@@ -54,12 +54,13 @@ Use the ❄︎ in the menu bar to pause, pick light, medium or heavy snow, switc
 
 You asked for it, so here it is! Snow falls on your Windows desktop and piles up on your windows and the taskbar. Everything from the Mac version is here too: drag a window to send the snow flying, roll and push snowballs, carry them around, stack three into a snowman, and hang fairy lights ✨
 
-```sh
-cd WINTER_IS_COMING/windows
-dotnet run -c Release
-```
+1. Grab `WinterIsComing-windows-vX-beta.zip` from [the Windows release](https://github.com/yike-shi/WINTER_IS_COMING/releases/tag/windows-v0.1) (not the "Source code" ones)
+2. Unzip it and double-click **WinterIsComing.exe**
+3. If Windows says "Windows protected your PC", click **More info → Run anyway**. It's a tiny indie app without a paid signature, so Windows doesn't recognize it yet 💙
 
-Use the ❄ icon in the system tray to pause, pick the snow amount, switch the fairy lights on, clear the snow, see how to play, or quit. You'll need the [.NET 8 SDK](https://dotnet.microsoft.com/download) (`winget install Microsoft.DotNet.SDK.8`).
+Use the ❄ icon in the system tray (bottom right, click **^** if you don't see it) to pause, pick the snow amount, switch the fairy lights on, clear the snow, see how to play, or quit.
+
+Want to run it from the code instead? Install the [.NET 8 SDK](https://dotnet.microsoft.com/download), then run `dotnet run -c Release` in the `windows` folder.
 
 ## Make it yours 🎨
 
