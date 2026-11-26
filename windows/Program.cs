@@ -1255,7 +1255,8 @@ static unsafe class Program
     const uint WS_POPUP = 0x80000000;
     const uint WS_EX_LAYERED = 0x80000, WS_EX_TRANSPARENT = 0x20, WS_EX_TOPMOST = 0x8,
                WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
-    const int GWL_EXSTYLE = -20;
+    const int GWL_EXSTYLE = -20, GWL_STYLE = -16;
+    const uint WS_CAPTION = 0x00C00000, GW_OWNER = 4;
     const uint WM_DESTROY = 0x2, WM_TIMER = 0x113, WM_DISPLAYCHANGE = 0x7E, WM_NULL = 0,
                WM_APP = 0x8000, WM_LBUTTONDOWN = 0x201, WM_LBUTTONUP = 0x202, WM_RBUTTONUP = 0x205,
                WM_MOUSEACTIVATE = 0x21, WM_SETCURSOR = 0x20, WM_CAPTURECHANGED = 0x215;
@@ -1330,6 +1331,7 @@ static unsafe class Program
     [DllImport("user32.dll")] static extern bool KillTimer(IntPtr hWnd, UIntPtr id);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
     [DllImport("user32.dll")] static extern IntPtr GetWindowLongPtrW(IntPtr hWnd, int index);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr hWnd, StringBuilder sb, int max);
@@ -1610,6 +1612,12 @@ static unsafe class Program
         long ex = GetWindowLongPtrW(h, GWL_EXSTYLE).ToInt64();
         if ((ex & WS_EX_TOOLWINDOW) != 0) return true;                       // tool windows, popups
         if ((ex & WS_EX_TRANSPARENT) != 0 && (ex & WS_EX_LAYERED) != 0) return true;  // other overlays
+        // Menus, right-click menus and other popups: no title bar, and owned by an app window, always on top
+        // or never activated. Real app windows (even frameless ones) are none of these.
+        long style = GetWindowLongPtrW(h, GWL_STYLE).ToInt64();
+        bool hasCaption = (style & WS_CAPTION) == WS_CAPTION;
+        bool owned = GetWindow(h, GW_OWNER) != IntPtr.Zero;
+        if (!hasCaption && (owned || (ex & WS_EX_TOPMOST) != 0 || (ex & WS_EX_NOACTIVATE) != 0)) return true;
         if (DwmGetWindowAttribute(h, DWMWA_CLOAKED, out int cloaked, 4) == 0 && cloaked != 0) return true; // other desktops, hidden UWP
         if (GetWindowTextLengthW(h) == 0) return true;
         clsName.Clear();
