@@ -968,6 +968,31 @@ enum PalsShape {
     }
 }
 
+/// Shows or hides something smoothly. A change only counts once it has lasted a moment, so the brief
+/// window-list flips while you swipe between Spaces or full-screen apps don't make things flicker.
+struct Presence {
+    var shown = true
+    var alpha: CGFloat = 1
+    var changeSince: CGFloat = -1
+
+    @MainActor mutating func update(_ node: SKNode, want: Bool, t: CGFloat, dt: CGFloat, frozen: Bool) {
+        if want != shown {
+            if changeSince < 0 { changeSince = t }
+            // coming back is quick; going away waits a little longer so brief flips don't cause flicker
+            if t - changeSince > (want ? 0.1 : 0.35) && !frozen {
+                shown = want
+                changeSince = -1
+            }
+        } else {
+            changeSince = -1
+        }
+        let target: CGFloat = shown ? 1 : 0
+        alpha += max(-dt * 6, min(dt * 6, target - alpha))
+        node.alpha = alpha
+        node.isHidden = alpha < 0.01
+    }
+}
+
 @MainActor final class Companions {
     enum DogMode { case wander, sit, follow, chase, fetchBack, comeToMe, cuddle, petted, howl, wreck, bark, nap, toFire, byFire }
     enum MeMode { case idle, walk, sit, wave, throwBall, pet, nap, toFire, byFire }
@@ -1032,6 +1057,14 @@ enum PalsShape {
     var lightPhase: [CGFloat] = []
     var lightSpeed: [CGFloat] = []
     var treeScale: CGFloat = 1
+    var treePresence = Presence()
+    var firePresence = Presence()
+    var dogPresence = Presence()
+    var mePresence = Presence()
+    var holdUntil: CGFloat = 0           // right after switching Spaces: hold everything where it is
+    var treeCoveredSince: CGFloat = -1
+    var fireCoveredSince: CGFloat = -1
+    var lastSceneryT: CGFloat = 0
     var fireX: CGFloat = 0
     var treeX: CGFloat = 0
     var fireOn = UserDefaults.standard.object(forKey: "campfire") as? Bool ?? true
@@ -1160,10 +1193,10 @@ enum PalsShape {
         poseMe(t)
         dog.root.position = CGPoint(x: dogX, y: dogY)
         dog.root.xScale = dogFacing
-        dog.root.isHidden = !onOpenGround(dogX)
+        dogPresence.update(dog.root, want: onOpenGround(dogX), t: t, dt: dt, frozen: t < holdUntil)
         me.root.position = CGPoint(x: meX, y: meY)
         me.root.xScale = meFacing
-        me.root.isHidden = !onOpenGround(meX)
+        mePresence.update(me.root, want: onOpenGround(meX), t: t, dt: dt, frozen: t < holdUntil)
         if napping && t > nextZ {
             nextZ = t + 3
             float("z", at: CGPoint(x: meX + meFacing * 14, y: meY + 70), size: 12)
@@ -1970,6 +2003,7 @@ extension Companions {
         fireOn = on
         UserDefaults.standard.set(on, forKey: "campfire")
         fireNode.isHidden = !on
+        firePresence = Presence(shown: on, alpha: on ? 1 : 0)
         if !on && inCampfire { endCampfire(scene.t) }
     }
 
@@ -1977,19 +2011,30 @@ extension Companions {
         treeOn = on
         UserDefaults.standard.set(on, forKey: "xmasTree")
         treeNode.isHidden = !on
+        treePresence = Presence(shown: on, alpha: on ? 1 : 0)
     }
 
     func updateScenery(_ t: CGFloat) {
         let w = scene.size.width
-        if t > propsCheck {
-            propsCheck = t + 3
-            // move them if a window or the Dock now covers their spot
-            if !visible(treeX) { treeX = openSpot(near: w * 0.85, range: w * 0.4) }
+        let dt = min(0.1, max(0, t - lastSceneryT))
+        lastSceneryT = t
+        if t > propsCheck && t > holdUntil {
+            propsCheck = t + 1
+            // Move them only if their spot has stayed covered (by a window or the Dock) for a while and
+            // there is open ground elsewhere. In a full-screen app they just wait, hidden, until you come back.
+            let open = openGroundShare() > 0.15
+            treeCoveredSince = visible(treeX) ? -1 : (treeCoveredSince < 0 ? t : treeCoveredSince)
+            if treeCoveredSince >= 0 && t - treeCoveredSince > 4 && open {
+                treeX = openSpot(near: w * 0.85, range: w * 0.4)
+                treeCoveredSince = -1
+            }
             let gap = 40 + 32 * treeScale             // keep the fire clear of the tree
-            if !visible(fireX) || abs(fireX - treeX) < gap {
+            fireCoveredSince = visible(fireX) ? -1 : (fireCoveredSince < 0 ? t : fireCoveredSince)
+            if (fireCoveredSince >= 0 && t - fireCoveredSince > 4 && open) || abs(fireX - treeX) < gap {
                 let nx = openSpot(near: w * 0.6, range: w * 0.35)
                 if visible(nx) && abs(nx - treeX) >= gap {
                     fireX = nx
+                    fireCoveredSince = -1
                     if inCampfire { endCampfire(t) }
                 }
             }
@@ -1999,7 +2044,7 @@ extension Companions {
             if abs(k - treeScale) > 0.01 { buildTree() }   // the screen changed size
             treeX = min(max(treeX, 34 * treeScale), w - 34 * treeScale)   // keep the whole tree on screen
             treeNode.position = CGPoint(x: treeX, y: groundY(treeX))
-            treeNode.isHidden = !onOpenGround(treeX)
+            treePresence.update(treeNode, want: onOpenGround(treeX), t: t, dt: dt, frozen: t < holdUntil)
             if !treeNode.isHidden {
                 // each bulb twinkles at its own pace: dim → bright, with a little pulse
                 for i in 0..<treeLights.count {
@@ -2022,7 +2067,7 @@ extension Companions {
         }
         guard fireOn else { return }
         fireNode.position = CGPoint(x: fireX, y: groundY(fireX))
-        fireNode.isHidden = !onOpenGround(fireX)
+        firePresence.update(fireNode, want: onOpenGround(fireX), t: t, dt: dt, frozen: t < holdUntil)
         guard !fireNode.isHidden, flames.count == 3 else { return }
         // flicker: each flame layer sways and stretches at its own pace; it burns low while you nap
         fireDim += ((napping ? 0.55 : 1) - fireDim) * 0.03
@@ -2056,6 +2101,14 @@ extension Companions {
             meltBall(b)
             break
         }
+    }
+
+    /// How much of the ground (0...1) isn't covered by windows
+    func openGroundShare() -> CGFloat {
+        guard let g = scene.ground, g.count > 0 else { return 0 }
+        var open = 0
+        for c in stride(from: 0, to: g.count, by: 4) where !g.occ[c] { open += 1 }
+        return CGFloat(open) / CGFloat((g.count + 3) / 4)
     }
 
     func meltBall(_ b: Snowball) {
@@ -2139,6 +2192,9 @@ final class SnowScene: SKScene {
     var pals: Companions?                        // you and your beagle
 
     // The menu reaches the companions through these, like it does for the fairy lights
+    /// Called when you switch Spaces or swipe between full-screen apps
+    func spaceChanged() { pals?.holdUntil = t + 0.5 }
+
     var palsEnabled: Bool { pals?.enabled ?? true }
     func setPals(_ on: Bool) { pals?.setEnabled(on) }
     var campfireOn: Bool { pals?.fireOn ?? false }
@@ -3038,7 +3094,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
             ws.addObserver(self, selector: #selector(resumeRendering), name: name, object: nil)
         }
+        // Swiping between Spaces / full-screen apps: let the companions and scenery hold still for a moment
+        ws.addObserver(self, selector: #selector(spaceChanged), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
     }
+
+    @objc func spaceChanged() { scene.spaceChanged() }
 
     @objc func suspendRendering() {
         (window.contentView as? SKView)?.isPaused = true
@@ -3052,7 +3112,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func setupMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "❄︎"
+        // Apple's own snowflake symbol, so it matches the size and weight of the other menu bar icons
+        // (it adapts to light and dark menu bars); falls back to the text snowflake if unavailable
+        if let img = NSImage(systemSymbolName: "snowflake", accessibilityDescription: "WinterIsComing") {
+            let sized = img.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)) ?? img
+            sized.isTemplate = true
+            statusItem.button?.image = sized
+        } else {
+            statusItem.button?.title = "❄︎"
+        }
         let menu = NSMenu()
 
         pauseItem = NSMenuItem(title: "Pause Snow", action: #selector(togglePause), keyEquivalent: "p")
