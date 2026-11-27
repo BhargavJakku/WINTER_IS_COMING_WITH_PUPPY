@@ -26,6 +26,9 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
+# Optional: a short howl for the beagle (assets/howl.m4a, .mp3, .wav or .aiff)
+for f in assets/howl.*(N); do cp "$f" "$APP/Contents/Resources/"; done
+
 # 3. Info.plist (LSUIElement = no Dock icon, it lives in the menu bar)
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -34,7 +37,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
 <dict>
   <key>CFBundleName</key>               <string>WinterIsComing</string>
   <key>CFBundleDisplayName</key>        <string>WinterIsComing</string>
-  <key>CFBundleIdentifier</key>         <string>io.github.yike-shi.winteriscoming</string>
+  <key>CFBundleIdentifier</key>         <string>io.github.bhargavjakku.winteriscoming-puppy</string>
   <key>CFBundleExecutable</key>         <string>WinterIsComing</string>
   <key>CFBundleIconFile</key>           <string>AppIcon</string>
   <key>CFBundlePackageType</key>        <string>APPL</string>
