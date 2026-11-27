@@ -1,7 +1,8 @@
 // WinterIsComing — snow on your Mac desktop.
 // Snow piles up on top of windows, the Dock and the bottom of the screen and flies off when you drag a
 // window. Hover over the snow to roll snowballs, push them into each other, drag them with the mouse and
-// stack three of them into a snowman. See README.md for the full list.
+// stack three of them into a snowman. You and your beagle live on the snow too (see "Beagle & me" below).
+// See README.md for the full list.
 // Build: swiftc -O WinterIsComing.swift -o WinterIsComing
 // Run:   ./WinterIsComing   (a ❄︎ icon appears in the menu bar: pause / snow amount / quit)
 
@@ -16,7 +17,7 @@ enum Cfg {
     static let windowPileMax: CGFloat = 16   // max snow height on top of a window
     static let groundPileMax: CGFloat = 34   // max snow height at the bottom of the screen
     static let gravity: CGFloat = 900        // gravity for snow sliding off
-    static let pollInterval = 1.0 / 30.0     // how often window positions are checked (s)
+    static var pollInterval = 1.0 / 30.0     // how often window positions are checked (s); slower while napping
     static let maxClumps = 900               // max number of falling snow clumps at once
     static let dockPileMax: CGFloat = 18     // max snow height on the Dock
     static let dockPad: CGFloat = 4          // extra width of the Dock pile on each side of the icon area
@@ -462,6 +463,1194 @@ let layers: [Layer] = [
     func remove() { node.removeFromParent() }
 }
 
+// MARK: - Pet & me
+//
+// You and your pet live on the snow at the bottom of the screen. The app draws both of you itself from a
+// "recipe" (colors and options, see PalsRecipe), so there are no image files to ship and anyone can swap in
+// themselves and their own pet. What happens:
+//   • click the pet to pet it; click it again quickly and it howls
+//   • click yourself and you call the pet over for a cuddle
+//   • every so often you throw a snowball and the pet fetches it
+//   • throw a snowball with the mouse and the pet chases it
+//   • build a snowman and, after a few seconds, the pet knocks it over
+//   • leave the mouse alone for a minute and you both nap; the whole app then runs at a lower frame rate
+// Turn it all on or off from the ❄︎ menu → Pet & Me.
+
+enum Pals {
+    static let outline: CGFloat = 1.5         // outline thickness (points)
+    static let renderScale: CGFloat = 3       // parts are drawn at 3x so they stay smooth on any display
+    static let dogWalk: CGFloat = 55          // beagle trotting speed (points per second)
+    static let dogRun: CGFloat = 170          // beagle running speed
+    static let meWalk: CGFloat = 36           // your walking speed
+    static let sink: CGFloat = 2.5            // how deep feet sink into the snow
+    static let snowmanGrace: CGFloat = 6      // seconds to admire a snowman before the beagle knocks it over
+    static let howlWindow: CGFloat = 0.45     // a second click on the beagle within this time makes it howl
+    static let napAfter: CGFloat = 60         // no mouse movement for this long: nap + lower frame rate
+    static let activeFPS = 60
+    static let ecoFPS = 30                    // frame rate while napping or in Low Power Mode
+    static let activePoll = 1.0 / 30.0        // how often window positions are checked while active (s)
+    static let ecoPoll = 1.0 / 8.0            // ... and while napping
+    static let fetchEvery: ClosedRange<CGFloat> = 35...70   // seconds between your snowball throws
+}
+
+/// What you and your pet look like. Colors are hex strings ("#RRGGBB").
+struct PalsRecipe {
+    var meName = "Buncy"
+    var skin = "#805038"
+    var hair = "#1E1816"
+    var hat = "#84868C"          // beanie
+    var jacket = "#F6F7F9"
+    var collar = "#B82E36"
+    var pants = "#3E4252"
+    var boots = "#4A362A"
+
+    var petName = ""             // e.g. "Max": shown in the speech bubbles when set
+    var coat = "#FCFAF5"         // main fur: body, legs, muzzle
+    var markings = "#CC843E"     // head, thigh and shoulder patches, tail
+    var ears = "#AA642A"
+    var saddle = "#42342C"       // the dark patch on the back
+    var blaze = true             // light stripe down the middle of the face
+}
+
+func palsColor(_ hex: String, _ alpha: CGFloat = 1) -> CGColor {
+    var s = hex.trimmingCharacters(in: .whitespaces)
+    if s.hasPrefix("#") { s.removeFirst() }
+    let v = UInt32(s, radix: 16) ?? 0x888888
+    return CGColor(red: CGFloat((v >> 16) & 255) / 255, green: CGFloat((v >> 8) & 255) / 255,
+                   blue: CGFloat(v & 255) / 255, alpha: alpha)
+}
+
+func palsRGB(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> CGColor {
+    CGColor(red: r / 255, green: g / 255, blue: b / 255, alpha: a)
+}
+
+/// Multiply a color's channels (used to derive shades from the recipe colors)
+func palsTint(_ c: CGColor, _ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> CGColor {
+    let k = c.converted(to: CGColorSpaceCreateDeviceRGB(), intent: .defaultIntent, options: nil)?.components ?? [0.5, 0.5, 0.5, 1]
+    guard k.count >= 3 else { return c }
+    return CGColor(red: min(1, k[0] * r), green: min(1, k[1] * g), blue: min(1, k[2] * b), alpha: k.count > 3 ? k[3] : 1)
+}
+
+/// Every color used in the drawings, derived from a recipe
+struct PalsInk {
+    let line, white, wshade, tan, tandark, saddle, nose, blush, tongue, freckle, shine: CGColor
+    let skin, skinShade, hair, beanie, beanieDark, pom, rib, jacket, jshade, collar, pants, pantsBack, boots, zip, mouth: CGColor
+
+    init(_ r: PalsRecipe) {
+        line = palsRGB(61, 43, 34)
+        let coat = palsColor(r.coat)
+        white = coat
+        wshade = palsTint(coat, 0.893, 0.880, 0.861)
+        tan = palsColor(r.markings)
+        tandark = palsColor(r.ears)
+        saddle = palsColor(r.saddle)
+        nose = palsRGB(38, 30, 28)
+        blush = palsRGB(244, 150, 158, 0.75)
+        tongue = palsRGB(236, 120, 135)
+        freckle = palsRGB(150, 110, 90)
+        shine = palsRGB(255, 255, 255)
+        let skinColor = palsColor(r.skin)
+        skin = skinColor
+        skinShade = palsTint(skinColor, 0.83, 0.80, 0.79)
+        hair = palsColor(r.hair)
+        let hat = palsColor(r.hat)
+        beanie = hat
+        beanieDark = palsTint(hat, 0.82, 0.82, 0.836)
+        pom = palsTint(hat, 1.106, 1.105, 1.10)
+        rib = palsTint(hat, 0.70, 0.70, 0.714)
+        let coatColor = palsColor(r.jacket)
+        jacket = coatColor
+        jshade = palsTint(coatColor, 0.862, 0.883, 0.908)
+        collar = palsColor(r.collar)
+        let trousers = palsColor(r.pants)
+        pants = trousers
+        pantsBack = palsTint(trousers, 0.85, 0.85, 0.85)
+        boots = palsColor(r.boots)
+        zip = palsRGB(160, 162, 168)
+        mouth = palsRGB(70, 30, 30)
+    }
+}
+
+extension CGMutablePath {
+    func m(_ x: CGFloat, _ y: CGFloat) { move(to: CGPoint(x: x, y: y)) }
+    func l(_ x: CGFloat, _ y: CGFloat) { addLine(to: CGPoint(x: x, y: y)) }
+    func c(_ x1: CGFloat, _ y1: CGFloat, _ x2: CGFloat, _ y2: CGFloat, _ x: CGFloat, _ y: CGFloat) {
+        addCurve(to: CGPoint(x: x, y: y), control1: CGPoint(x: x1, y: y1), control2: CGPoint(x: x2, y: y2))
+    }
+    func z() { closeSubpath() }
+}
+
+/// Draws shapes in "design" coordinates (points, y pointing DOWN, ground at y = 0, facing right).
+/// The first pass (no context) only measures how big the drawing is; the second pass paints it.
+final class PalsPainter {
+    let ctx: CGContext?
+    let ink: PalsInk
+    var bounds = CGRect.null
+
+    init(ctx: CGContext?, ink: PalsInk) { self.ctx = ctx; self.ink = ink }
+
+    /// Fill shapes as one silhouette with a single outline around the outside
+    func blob(_ shapes: [CGPath], _ fill: CGColor, outline: Bool = true) {
+        guard let c = ctx else {
+            let pad = outline ? Pals.outline : 0
+            for s in shapes { bounds = bounds.union(s.boundingBoxOfPath.insetBy(dx: -pad, dy: -pad)) }
+            return
+        }
+        if outline {
+            for s in shapes { c.addPath(s) }
+            c.setStrokeColor(ink.line)
+            c.setLineWidth(Pals.outline * 2)
+            c.setLineJoin(.round)
+            c.strokePath()
+        }
+        for s in shapes { c.addPath(s) }
+        c.setFillColor(fill)
+        c.fillPath()
+    }
+
+    /// Paint shapes, but only inside the clip shapes (markings, shading)
+    func clipped(_ clip: [CGPath], _ shapes: [CGPath], _ color: CGColor) {
+        guard let c = ctx else { return }
+        c.saveGState()
+        for s in clip { c.addPath(s) }
+        c.clip()
+        for s in shapes { c.addPath(s) }
+        c.setFillColor(color)
+        c.fillPath()
+        c.restoreGState()
+    }
+
+    func stroke(_ p: CGPath, _ color: CGColor, _ width: CGFloat) {
+        guard let c = ctx else {
+            bounds = bounds.union(p.boundingBoxOfPath.insetBy(dx: -width / 2, dy: -width / 2))
+            return
+        }
+        c.addPath(p)
+        c.setStrokeColor(color)
+        c.setLineWidth(width)
+        c.setLineCap(.round)
+        c.setLineJoin(.round)
+        c.strokePath()
+    }
+
+    func dot(_ x: CGFloat, _ y: CGFloat, _ r: CGFloat, _ color: CGColor) {
+        let rect = CGRect(x: x - r, y: y - r, width: 2 * r, height: 2 * r)
+        guard let c = ctx else { bounds = bounds.union(rect); return }
+        c.setFillColor(color)
+        c.fillEllipse(in: rect)
+    }
+
+    /// Eyes: "open" (dot with a shine), "happy" (^ ^) or "closed" (sleepy curve)
+    func eyes(_ pts: [(CGFloat, CGFloat)], _ kind: String, r: CGFloat) {
+        for (x, y) in pts {
+            switch kind {
+            case "open":
+                dot(x, y, r, ink.line)
+                dot(x + 0.6, y - 0.7, r * 0.35, ink.shine)
+            case "happy":
+                stroke(PalsShape.path { $0.m(x - 2.2, y + 0.8); $0.c(x - 1.2, y - 1.6, x + 1.2, y - 1.6, x + 2.2, y + 0.8) }, ink.line, 1.2)
+            default:
+                stroke(PalsShape.path { $0.m(x - 2.2, y - 0.3); $0.c(x - 1.2, y + 1.3, x + 1.2, y + 1.3, x + 2.2, y - 0.3) }, ink.line, 1.2)
+            }
+        }
+    }
+}
+
+/// One drawn body part: its texture, size in points, the joint it turns around, and where that joint sits
+struct PalsPart {
+    let tex: SKTexture
+    let size: CGSize
+    let anchor: CGPoint
+    let base: CGPoint     // joint position relative to the character's feet (SpriteKit coordinates, y up)
+}
+
+/// Basic shapes in design coordinates
+enum PalsShape {
+    static func ell(_ cx: CGFloat, _ cy: CGFloat, _ rx: CGFloat, _ ry: CGFloat, _ rot: CGFloat = 0) -> CGPath {
+        var t = CGAffineTransform(translationX: cx, y: cy).rotated(by: rot)
+        return CGPath(ellipseIn: CGRect(x: -rx, y: -ry, width: 2 * rx, height: 2 * ry), transform: &t)
+    }
+
+    static func rr(_ x0: CGFloat, _ y0: CGFloat, _ x1: CGFloat, _ y1: CGFloat, _ r: CGFloat) -> CGPath {
+        let w = x1 - x0, h = y1 - y0
+        let k = max(0, min(r, w / 2 - 0.001, h / 2 - 0.001))
+        return CGPath(roundedRect: CGRect(x: x0, y: y0, width: w, height: h), cornerWidth: k, cornerHeight: k, transform: nil)
+    }
+
+    static func path(_ build: (CGMutablePath) -> Void) -> CGPath {
+        let p = CGMutablePath()
+        build(p)
+        return p
+    }
+}
+
+@MainActor enum PalsArt {
+    static func ell(_ cx: CGFloat, _ cy: CGFloat, _ rx: CGFloat, _ ry: CGFloat, _ rot: CGFloat = 0) -> CGPath { PalsShape.ell(cx, cy, rx, ry, rot) }
+    static func rr(_ x0: CGFloat, _ y0: CGFloat, _ x1: CGFloat, _ y1: CGFloat, _ r: CGFloat) -> CGPath { PalsShape.rr(x0, y0, x1, y1, r) }
+    static func path(_ build: (CGMutablePath) -> Void) -> CGPath { PalsShape.path(build) }
+
+    /// Measure, then paint one part into a texture
+    static func render(pivot: CGPoint, ink: PalsInk, _ draw: (PalsPainter) -> Void) -> PalsPart {
+        let measure = PalsPainter(ctx: nil, ink: ink)
+        draw(measure)
+        let b = measure.bounds.isNull ? CGRect(x: 0, y: 0, width: 1, height: 1) : measure.bounds
+        let x0 = floor(b.minX) - 1, y0 = floor(b.minY) - 1
+        let w = ceil(b.maxX) + 1 - x0, h = ceil(b.maxY) + 1 - y0
+        let S = Pals.renderScale
+        let pw = Int(w * S), ph = Int(h * S)
+        guard let ctx = CGContext(data: nil, width: pw, height: ph, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            return PalsPart(tex: SKTexture(), size: CGSize(width: 1, height: 1), anchor: .zero, base: .zero)
+        }
+        // Flip so the design coordinates (y down) map straight onto the image
+        ctx.translateBy(x: 0, y: CGFloat(ph))
+        ctx.scaleBy(x: S, y: -S)
+        ctx.translateBy(x: -x0, y: -y0)
+        draw(PalsPainter(ctx: ctx, ink: ink))
+        guard let img = ctx.makeImage() else {
+            return PalsPart(tex: SKTexture(), size: CGSize(width: 1, height: 1), anchor: .zero, base: .zero)
+        }
+        return PalsPart(tex: SKTexture(cgImage: img), size: CGSize(width: w, height: h),
+                        anchor: CGPoint(x: (pivot.x - x0) / w, y: 1 - (pivot.y - y0) / h),
+                        base: CGPoint(x: pivot.x, y: -pivot.y))
+    }
+
+    // MARK: Pet (faces right)
+
+    static let hipY: CGFloat = -16
+    static let tailPivot = CGPoint(x: -23, y: -30)
+    static let neck = CGPoint(x: 20, y: -35)
+
+    static func dogLeg(_ p: PalsPainter, _ x: CGFloat, far: Bool) {
+        p.blob([rr(x - 3.6, hipY - 2, x + 3.6, -1.5, 3.4), ell(x + 1.2, -2.2, 4.6, 2.6)], far ? p.ink.wshade : p.ink.white)
+    }
+
+    static func dogBody(_ p: PalsPainter) {
+        let k = p.ink
+        let sh = [ell(0, -24, 24, 11.5), ell(15, -23, 11.5, 11), ell(-16, -23, 10.5, 10.5)]
+        p.blob(sh, k.white)
+        p.clipped(sh, [ell(-17, -23, 9, 8.5)], k.tan)          // rear thigh
+        p.clipped(sh, [ell(-3, -34, 19, 9.5)], k.saddle)       // dark saddle
+        p.clipped(sh, [ell(19, -31, 7, 5.5)], k.tan)           // shoulder patch
+        p.clipped(sh, [ell(1, -11.5, 20, 3)], k.wshade)        // belly shadow
+    }
+
+    static func dogTail(_ p: PalsPainter) {
+        let k = p.ink
+        let t = path { $0.m(-23, -30); $0.c(-29, -38, -31, -46, -28, -54) }
+        p.stroke(t, k.line, 5 + Pals.outline * 2)
+        p.stroke(t, k.tan, 5)
+        p.stroke(path { $0.m(-30.2, -47); $0.c(-30, -50, -29.3, -52.5, -28, -54) }, k.white, 5)
+    }
+
+    /// kind: open, happy, sleep, howl, bark
+    static func dogHead(_ p: PalsPainter, _ kind: String, blaze: Bool) {
+        let k = p.ink
+        // far ear peeks out behind the head on the right
+        p.blob([path { $0.m(36, -55); $0.c(42, -54, 45, -46, 44, -38); $0.c(43, -34, 40, -34, 38, -38); $0.z() }], k.tandark)
+        let hs = [ell(27, -45, 15, 13)]
+        p.blob(hs, k.tan)
+        if blaze {
+            p.clipped(hs, [path { $0.m(28, -60); $0.l(32, -60); $0.c(33, -52, 35, -48, 37, -43)
+                                  $0.l(25, -43); $0.c(27, -48, 28, -52, 28, -60); $0.z() }], k.white)
+        }
+        let muzzle = ell(31.5, -38.2, 9.5, 6.5)
+        p.blob([muzzle], k.white)
+        p.clipped([muzzle], [ell(31.5, -32.5, 9, 2.5)], k.wshade)
+        // near ear hangs in front, on the left of the face
+        p.blob([path { $0.m(18, -55); $0.c(11, -52, 8.5, -41, 11, -33); $0.c(13, -28, 19, -29, 20.5, -34)
+                       $0.c(21.5, -40, 21, -49, 18, -55); $0.z() }], k.tandark)
+        // nose and mouth
+        p.dot(34.5, -41.6, 3.3, k.nose)
+        p.dot(33.5, -42.6, 0.9, palsRGB(255, 255, 255, 0.8))
+        if kind == "howl" || kind == "bark" {
+            p.blob([ell(33.5, -35.8, 2.4, kind == "howl" ? 2.6 : 1.9)], k.nose, outline: false)
+            p.dot(33.5, -35.0, 1.2, k.tongue)
+        } else {
+            p.stroke(path { $0.m(34.5, -38.6); $0.c(34.3, -36.8, 32.4, -36.4, 31.4, -37.4) }, k.line, 1.1)
+            p.stroke(path { $0.m(34.5, -38.6); $0.c(34.7, -36.8, 36.6, -36.4, 37.6, -37.4) }, k.line, 1.1)
+            if kind == "happy" { p.blob([ell(34.5, -35.6, 1.5, 1.8)], k.tongue, outline: false) }
+        }
+        for (fx, fy) in [(27.5, -39.0), (28.6, -37.4), (39.6, -39.6)] as [(CGFloat, CGFloat)] {
+            p.dot(fx, fy, 0.45, k.freckle)                                   // freckles
+        }
+        let eyeKind = kind == "open" || kind == "bark" ? "open" : (kind == "happy" ? "happy" : "closed")
+        p.eyes([(26.5, -46.5), (36.8, -46.5)], eyeKind, r: 1.8)
+        p.dot(24.2, -41.6, 1.9, k.blush)
+        p.dot(40.2, -41.6, 1.6, k.blush)
+    }
+
+    static func dogSit(_ p: PalsPainter) {
+        let k = p.ink
+        let sh = [ell(-6, -12.5, 13, 12.5), ell(9, -24, 11.5, 15), ell(-1, -18, 12, 12)]
+        p.blob([rr(14.5, -16, 21, -1.5, 3.2), ell(19, -2.2, 4.3, 2.4)], k.wshade)   // far front leg
+        p.blob(sh, k.white)
+        p.clipped(sh, [ell(-8, -14, 9.5, 9)], k.tan)
+        p.clipped(sh, [ell(-4, -27, 9, 13, -0.5)], k.saddle)
+        p.clipped(sh, [ell(13, -33, 6, 5)], k.tan)
+        p.blob([ell(1, -2.4, 8, 2.8)], k.white)                                   // hind paw
+        p.blob([rr(8.5, -18, 15, -1.5, 3.2), ell(13, -2.2, 4.3, 2.4)], k.white)    // near front leg
+    }
+
+    static func dogSleep(_ p: PalsPainter, blaze: Bool) {
+        let k = p.ink
+        let tail = path { $0.m(-24, -8); $0.c(-30, -3, -20, 1.5, -6, 0.5) }
+        p.stroke(tail, k.line, 5 + Pals.outline * 2)
+        p.stroke(tail, k.tan, 5)
+        p.stroke(path { $0.m(-12, 1.2); $0.c(-9, 1.2, -7.5, 0.9, -6, 0.5) }, k.white, 5)
+        let sh = [ell(-2, -11, 25, 10.5)]
+        p.blob(sh, k.white)
+        p.clipped(sh, [ell(-6, -20, 20, 8)], k.saddle)
+        p.clipped(sh, [ell(-19, -10, 8, 7)], k.tan)
+        p.blob([ell(18, -2.4, 12, 2.6)], k.white)                                 // paws stretched forward
+        let hs = [ell(21, -12, 12.5, 10)]
+        p.blob(hs, k.tan)
+        if blaze { p.clipped(hs, [path { $0.m(22, -22); $0.l(25, -22); $0.l(30, -9); $0.l(18, -9); $0.z() }], k.white) }
+        p.blob([ell(26.5, -7.5, 7.5, 5)], k.white)
+        p.dot(29.5, -10, 2.6, k.nose)
+        p.blob([path { $0.m(13, -19); $0.c(8, -16, 8, -6, 12, -2.5); $0.c(15, -1, 18, -4, 17, -9); $0.z() }], k.tandark)
+        p.eyes([(21, -13.5), (29, -13.5)], "closed", r: 1.6)
+        p.dot(19.5, -9.5, 1.6, k.blush)
+    }
+
+    // MARK: You (faces right, head turned three-quarters toward the viewer)
+
+    static let meHipY: CGFloat = -21
+    static let shoulderBack = CGPoint(x: -7, y: -42)
+    static let shoulderFront = CGPoint(x: 1, y: -42)
+    static let meNeck = CGPoint(x: 2, y: -48)
+
+    static func meLeg(_ p: PalsPainter, _ x: CGFloat, back: Bool) {
+        let k = p.ink
+        p.blob([rr(x - 4.4, meHipY - 2, x + 4.4, -3, 3.5), ell(x + 1.8, -3.2, 5.8, 3.4)], back ? k.pantsBack : k.pants)
+        p.clipped([ell(x + 1.8, -3.2, 5.8, 3.4)], [rr(x - 6, -6.5, x + 9, 2, 1)], k.boots)
+    }
+
+    static func meTorso(_ p: PalsPainter) {
+        let k = p.ink
+        let sh = [rr(-12.5, -47, 12.5, -16, 8.5)]
+        p.blob(sh, k.jacket)
+        for y in [-38.0, -28.5] as [CGFloat] { p.clipped(sh, [rr(-14, y, 14, y + 1.3, 0.6)], k.jshade) }   // puffer seams
+        p.clipped(sh, [rr(-14, -19.5, 14, -15, 1)], k.jshade)
+        p.stroke(path { $0.m(6, -46); $0.l(6, -17) }, k.jshade, 1.1)                                        // zip
+        p.dot(6, -40, 0.9, k.zip)
+        p.blob([rr(-7.5, -51, 11, -44.5, 3)], k.collar)
+    }
+
+    static func meArm(_ p: PalsPainter, _ s: CGPoint, front: Bool) {
+        let k = p.ink
+        let sleeve = rr(s.x - 4.4, s.y - 3, s.x + 4.4, s.y + 17, 4.2)
+        p.blob([ell(s.x, s.y + 19, 3.7, 3.7)], k.skin)                         // hand
+        p.blob([sleeve], front ? k.jacket : k.jshade)
+        p.clipped([sleeve], [rr(s.x - 6, s.y + 7, s.x + 6, s.y + 8.2, 0.5)], k.jshade)
+    }
+
+    /// kind: open, happy, sleep, call
+    static func meHead(_ p: PalsPainter, _ kind: String) {
+        let k = p.ink
+        // curly hair behind the face
+        var hair = [ell(-3, -62, 14.5, 13)]
+        for (dx, dy) in [(0.0, 0.0), (1.5, 5.0), (4.5, 8.5), (-0.5, -5.0)] as [(CGFloat, CGFloat)] {
+            hair.append(ell(-14.5 + dx, -57 + dy, 3.6, 3.6))
+        }
+        p.blob(hair, k.hair)
+        let face = [ell(4.5, -61, 13.5, 13.5)]
+        p.blob(face, k.skin)
+        p.clipped(face, [ell(-7, -61, 6, 14)], k.skinShade)
+        p.blob([ell(-6.5, -60.5, 2.6, 3.6)], k.skin)                            // ear
+        // beanie: pompom, dome, ribbed cuff
+        p.blob([ell(3, -84.5, 5.6, 5.3)], k.pom)
+        for a in stride(from: 0.0, to: 360.0, by: 45.0) {
+            let r = CGFloat(a) * .pi / 180
+            p.dot(3 + 3 * cos(r), -84.5 + 3 * sin(r), 0.8, k.beanieDark)
+        }
+        let dome = [path { $0.m(-12, -68); $0.c(-12, -83, 18, -83, 18, -68); $0.z() }]
+        p.blob(dome, k.beanie)
+        for x in stride(from: -9.0, to: 18.0, by: 3.0) { p.clipped(dome, [rr(CGFloat(x), -82, CGFloat(x) + 0.9, -66, 0.4)], k.beanieDark) }
+        let cuff = [rr(-13.5, -71.5, 19.5, -63.5, 3.8)]
+        p.blob(cuff, k.beanieDark)
+        for x in stride(from: -11.0, to: 19.0, by: 2.0) { p.clipped(cuff, [rr(CGFloat(x), -72, CGFloat(x) + 0.8, -63, 0.3)], k.rib) }
+        // face
+        let eyeKind = kind == "open" || kind == "call" ? "open" : (kind == "happy" ? "happy" : "closed")
+        p.eyes([(5.5, -57.5), (13.8, -57.5)], eyeKind, r: 1.8)
+        switch kind {
+        case "call": p.blob([ell(9.8, -51.8, 1.8, 2)], k.mouth, outline: false)
+        case "sleep": p.stroke(path { $0.m(8.8, -52); $0.l(10.8, -52) }, k.line, 1.1)
+        default: p.stroke(path { $0.m(7.6, -53); $0.c(8.6, -50.8, 11, -50.8, 12, -53) }, k.line, 1.2)
+        }
+    }
+
+    static func meSitLegs(_ p: PalsPainter) {
+        let k = p.ink
+        p.blob([rr(-6, -12, 18, -3, 4.2)], k.pantsBack)
+        p.blob([rr(-6, -10, 19, -0.5, 4.5)], k.pants)
+        p.blob([ell(20.5, -6.5, 3.6, 6.2)], k.boots)
+    }
+
+    /// Draw every part for a recipe (takes a few milliseconds; done at launch and when the recipe changes)
+    static func build(_ r: PalsRecipe) -> [String: PalsPart] {
+        let ink = PalsInk(r)
+        var parts: [String: PalsPart] = [:]
+        func add(_ name: String, _ pivot: CGPoint, _ draw: (PalsPainter) -> Void) {
+            parts[name] = render(pivot: pivot, ink: ink, draw)
+        }
+        let legs: [(String, CGFloat, Bool)] = [("dog_far_back", -10, true), ("dog_far_front", 17, true),
+                                               ("dog_near_back", -15, false), ("dog_near_front", 12, false)]
+        for (name, x, far) in legs { add(name, CGPoint(x: x, y: hipY)) { dogLeg($0, x, far: far) } }
+        add("dog_body", .zero) { dogBody($0) }
+        add("dog_tail", tailPivot) { dogTail($0) }
+        for kind in ["open", "happy", "sleep", "howl", "bark"] { add("dog_head_" + kind, neck) { dogHead($0, kind, blaze: r.blaze) } }
+        add("dog_sit", .zero) { dogSit($0) }
+        add("dog_sleep", .zero) { dogSleep($0, blaze: r.blaze) }
+        add("me_back_leg", CGPoint(x: -3.5, y: meHipY)) { meLeg($0, -3.5, back: true) }
+        add("me_front_leg", CGPoint(x: 3.5, y: meHipY)) { meLeg($0, 3.5, back: false) }
+        add("me_torso", .zero) { meTorso($0) }
+        add("me_arm_back", shoulderBack) { meArm($0, shoulderBack, front: false) }
+        add("me_arm_front", shoulderFront) { meArm($0, shoulderFront, front: true) }
+        for kind in ["open", "happy", "sleep", "call"] { add("me_head_" + kind, meNeck) { meHead($0, kind) } }
+        add("me_sit_legs", .zero) { meSitLegs($0) }
+        return parts
+    }
+}
+
+/// A character made of parts that turn around their joints. Each frame, a pose puts the parts it needs;
+/// parts that weren't put are hidden.
+@MainActor final class PalsRig {
+    let root = SKNode()
+    var parts: [String: PalsPart]
+    private var slots: [String: SKSpriteNode] = [:]
+    private var used = Set<String>()
+
+    init(parts: [String: PalsPart], slots order: [String]) {
+        self.parts = parts
+        for (i, name) in order.enumerated() {
+            let n = SKSpriteNode()
+            n.zPosition = CGFloat(i) * 0.01
+            n.isHidden = true
+            slots[name] = n
+            root.addChild(n)
+        }
+    }
+
+    func begin() { used.removeAll() }
+
+    /// Show `part` in `slot` at its joint position + (dx, dy), turned counter-clockwise by rot radians
+    func put(_ slot: String, _ part: String, dx: CGFloat = 0, dy: CGFloat = 0, rot: CGFloat = 0, yScale: CGFloat = 1) {
+        guard let n = slots[slot], let p = parts[part] else { return }
+        if n.texture !== p.tex {
+            n.texture = p.tex
+            n.size = p.size
+            n.anchorPoint = p.anchor
+        }
+        n.position = CGPoint(x: p.base.x + dx, y: p.base.y + dy)
+        n.zRotation = rot
+        n.yScale = yScale
+        n.isHidden = false
+        used.insert(slot)
+    }
+
+    func end() {
+        for (name, n) in slots where !used.contains(name) { n.isHidden = true }
+    }
+}
+
+@MainActor final class Companions {
+    enum DogMode { case wander, sit, follow, chase, fetchBack, comeToMe, cuddle, petted, howl, wreck, bark, nap }
+    enum MeMode { case idle, walk, sit, wave, throwBall, pet, nap }
+
+    unowned let scene: SnowScene
+    var recipe = PalsRecipe()
+    let dog: PalsRig
+    let me: PalsRig
+    private(set) var enabled = UserDefaults.standard.object(forKey: "pals") as? Bool ?? true
+
+    // the beagle
+    var dogX: CGFloat = 0, dogY: CGFloat = 0, dogFacing: CGFloat = 1, dogPh: CGFloat = 0
+    var dogMode = DogMode.wander
+    var dogTarget: CGFloat = 0
+    var dogUntil: CGFloat = 0          // when a timed mode ends
+    var dogRunning = false
+    var jumpUntil: CGFloat = 0
+    var lastDogClick: CGFloat = -10
+    var dogStepAcc: CGFloat = 0
+
+    // you
+    var meX: CGFloat = 0, meY: CGFloat = 0, meFacing: CGFloat = 1, mePh: CGFloat = 0
+    var meMode = MeMode.idle
+    var meTarget: CGFloat = 0
+    var meUntil: CGFloat = 0
+    var blinkUntil: CGFloat = 0
+    var meStepAcc: CGFloat = 0
+
+    // fetch, chasing and snowmen
+    var toy: SKSpriteNode?
+    var toyVel = CGVector.zero
+    var toyFlying = false
+    var toyHeld = false
+    var throwAt: CGFloat = -1
+    var nextFetch: CGFloat = 0
+    weak var chaseBall: Snowball?
+    var chaseX: CGFloat = 0
+    weak var snowmanBase: Snowball?
+    var snowmanAt: CGFloat = 0
+    var knockAt: CGFloat = -1
+
+    // napping / eco frame rate
+    var lastMouse = CGPoint.zero
+    var lastActive: CGFloat = 0
+    var napping = false
+    var eco = false
+    var powerCheck: CGFloat = 0
+    var lowPower = false
+    var nextZ: CGFloat = 0
+
+    init(scene: SnowScene) {
+        self.scene = scene
+        let parts = PalsArt.build(PalsRecipe())
+        dog = PalsRig(parts: parts, slots: ["farBack", "farFront", "tail", "body", "nearBack", "nearFront", "head"])
+        me = PalsRig(parts: parts, slots: ["armBack", "legBack", "legFront", "torso", "head", "armFront"])
+        dog.root.zPosition = 6.6
+        me.root.zPosition = 6.55
+        scene.world.addChild(me.root)
+        scene.world.addChild(dog.root)
+        let w = scene.size.width
+        meX = openSpot(near: w * 0.18, range: w * 0.15)
+        dogX = openSpot(near: meX + 60, range: 40)
+        dogTarget = dogX
+        meTarget = meX
+        nextFetch = scene.t + 20
+        lastMouse = NSEvent.mouseLocation
+        lastActive = scene.t
+        setEnabled(enabled)
+    }
+
+    func setEnabled(_ on: Bool) {
+        enabled = on
+        UserDefaults.standard.set(on, forKey: "pals")
+        dog.root.isHidden = !on
+        me.root.isHidden = !on
+        if !on { dropToy() }
+    }
+
+    /// Redraw both characters, e.g. after the recipe changed
+    func applyRecipe(_ r: PalsRecipe) {
+        recipe = r
+        let parts = PalsArt.build(r)
+        dog.parts = parts
+        me.parts = parts
+    }
+
+    // MARK: Ground
+
+    func groundY(_ x: CGFloat) -> CGFloat {
+        guard let g = scene.ground, let c = g.col(at: x) else { return 0 }
+        return max(0, g.topY + g.h[c] - Pals.sink)
+    }
+
+    /// Somewhere on the ground that isn't behind a window or the Dock
+    func visible(_ x: CGFloat) -> Bool {
+        guard let g = scene.ground, let c = g.col(at: x), !g.occ[c] else { return false }
+        if let d = scene.dockRect, x > d.minX - 10, x < d.maxX + 10 { return false }
+        return true
+    }
+
+    /// Not covered by a window (they are hidden while walking behind one)
+    func onOpenGround(_ x: CGFloat) -> Bool {
+        guard let g = scene.ground, let c = g.col(at: x) else { return false }
+        return !g.occ[c]
+    }
+
+    func clampX(_ x: CGFloat) -> CGFloat { min(scene.size.width - 30, max(30, x)) }
+
+    func openSpot(near x: CGFloat, range: CGFloat) -> CGFloat {
+        for _ in 0..<12 {
+            let c = clampX(x + rnd(-range, range))
+            if visible(c) { return c }
+        }
+        return clampX(x)
+    }
+
+    /// Leave footprints: press the snow down a little every few steps
+    func footprint(_ x: CGFloat, _ acc: inout CGFloat, _ moved: CGFloat, every: CGFloat) {
+        acc += moved
+        guard acc >= every, let g = scene.ground, let c = g.col(at: x) else { return }
+        acc = 0
+        if !g.occ[c] && g.h[c] > 3 {
+            g.h[c] -= 0.6
+            g.dirty = true
+        }
+    }
+
+    /// Walk x toward target; returns true once there
+    static func step(_ x: inout CGFloat, to target: CGFloat, speed: CGFloat, dt: CGFloat,
+                     facing: inout CGFloat, ph: inout CGFloat, stride: CGFloat) -> CGFloat? {
+        let d = target - x
+        if abs(d) < 2 { return nil }
+        let mv = min(abs(d), speed * dt) * (d > 0 ? 1 : -1)
+        x += mv
+        facing = d > 0 ? 1 : -1
+        ph += abs(mv) / stride
+        return abs(mv)
+    }
+
+    // MARK: Per-frame update
+
+    func update(_ dt: CGFloat) {
+        let t = scene.t
+        checkActivity(t)
+        guard enabled, scene.ground != nil else { return }
+        meX = clampX(meX)          // the screen may have changed size
+        dogX = clampX(dogX)
+        updateToy(dt, t)
+        updateMe(dt, t)
+        updateDog(dt, t)
+        checkSnowman(t)
+        // settle onto the snow surface
+        dogY += (groundY(dogX) - dogY) * min(1, dt * 10)
+        meY += (groundY(meX) - meY) * min(1, dt * 10)
+        poseDog(t)
+        poseMe(t)
+        dog.root.position = CGPoint(x: dogX, y: dogY)
+        dog.root.xScale = dogFacing
+        dog.root.isHidden = !onOpenGround(dogX)
+        me.root.position = CGPoint(x: meX, y: meY)
+        me.root.xScale = meFacing
+        me.root.isHidden = !onOpenGround(meX)
+        if napping && t > nextZ {
+            nextZ = t + 3
+            float("z", at: CGPoint(x: meX + meFacing * 14, y: meY + 70), size: 12)
+        }
+    }
+
+    // MARK: You
+
+    func updateMe(_ dt: CGFloat, _ t: CGFloat) {
+        if throwAt > 0 && t >= throwAt { throwAt = -1; launchToy() }
+        switch meMode {
+        case .idle, .sit:
+            if t > meUntil {
+                if meMode == .sit { meMode = .idle; meUntil = t + rnd(1, 3); break }
+                let r = CGFloat.random(in: 0...1)
+                if r < 0.6 {
+                    meTarget = openSpot(near: meX, range: 220)
+                    meMode = .walk
+                } else if r < 0.8 {
+                    meMode = .sit
+                    meUntil = t + rnd(8, 16)
+                } else {
+                    meUntil = t + rnd(3, 7)
+                }
+            }
+            if t > nextFetch && toy == nil && dogFree && !napping { startThrow(t) }
+        case .walk:
+            if let moved = Companions.step(&meX, to: meTarget, speed: Pals.meWalk, dt: dt, facing: &meFacing, ph: &mePh, stride: 7) {
+                footprint(meX, &meStepAcc, moved, every: 11)
+            } else {
+                meMode = .idle
+                meUntil = t + rnd(3, 8)
+            }
+        case .wave, .throwBall, .pet:
+            if t > meUntil { meMode = .idle; meUntil = t + rnd(2, 5) }
+        case .nap:
+            break
+        }
+    }
+
+    var dogFree: Bool { [.wander, .sit, .follow].contains(dogMode) }
+
+    func startThrow(_ t: CGFloat) {
+        // throw toward whichever side has more room
+        let w = scene.size.width
+        meFacing = meX < w / 2 ? 1 : -1
+        meMode = .throwBall
+        meUntil = t + 0.7
+        throwAt = t + 0.3
+        nextFetch = t + rnd(Pals.fetchEvery.lowerBound, Pals.fetchEvery.upperBound)
+    }
+
+    // MARK: The Pet
+
+    func updateDog(_ dt: CGFloat, _ t: CGFloat) {
+        var speed = Pals.dogWalk
+        dogRunning = false
+        switch dogMode {
+        case .wander:
+            if dogRunningZoomies { speed = Pals.dogRun; dogRunning = true }
+            if moveDog(dt, speed) == nil {
+                dogRunningZoomies = false
+                pickDogIdle(t)
+            }
+        case .sit:
+            if t > dogUntil { newWanderTarget() }
+        case .follow:
+            dogTarget = clampX(meX + (dogX < meX ? -34 : 34))
+            if moveDog(dt, speed) == nil {
+                dogMode = .sit
+                dogFacing = meX > dogX ? 1 : -1
+                dogUntil = t + rnd(5, 10)
+            }
+        case .chase:
+            dogRunning = true
+            if let toy = toy, !toyHeld {
+                let side: CGFloat = dogX < toy.position.x ? -1 : 1
+                dogTarget = clampX(toy.position.x + side * 30)
+                if abs(dogTarget - dogX) < 2 { dogFacing = toy.position.x > dogX ? 1 : -1 }
+                let mouthX = dogX + dogFacing * 34
+                if abs(toy.position.x - mouthX) < 12 && toy.position.y < dogY + 48 {
+                    toyHeld = true
+                    toyFlying = false
+                    if toy.position.y > dogY + 20 { jumpUntil = t + 0.35 }   // caught it in the air
+                    dogMode = .fetchBack
+                }
+            } else if let b = chaseBall {
+                chaseX = b.x
+                dogTarget = clampX(b.x)
+            } else {
+                dogTarget = clampX(chaseX)
+            }
+            if moveDog(dt, Pals.dogRun) == nil && toy == nil && chaseBall == nil {
+                dogMode = .sit
+                dogUntil = t + 2.5
+                say("*sniff sniff*", over: .dog)
+            }
+        case .fetchBack:
+            dogRunning = true
+            dogTarget = clampX(meX + (dogX < meX ? -30 : 30))
+            if moveDog(dt, Pals.dogRun) == nil {
+                dropToy()
+                dogFacing = meX > dogX ? 1 : -1
+                cuddle(t, 1.8)
+            }
+        case .comeToMe:
+            dogRunning = true
+            dogTarget = clampX(meX + (dogX < meX ? -30 : 30))
+            if moveDog(dt, Pals.dogRun) == nil {
+                dogFacing = meX > dogX ? 1 : -1
+                jumpUntil = t + 0.4
+                cuddle(t, 2.4)
+            }
+        case .cuddle, .petted:
+            if t > dogUntil { newWanderTarget() }
+        case .howl:
+            if t > dogUntil { newWanderTarget() }
+        case .wreck:
+            dogRunning = true
+            guard let st = snowmanStack() else { snowmanBase = nil; newWanderTarget(); break }
+            let base = st[0]
+            let onGround = base.pile === scene.ground
+            if onGround {
+                let side: CGFloat = dogX < base.x ? -1 : 1
+                dogTarget = clampX(base.x + side * (base.r + 24))
+            } else {
+                dogTarget = clampX(base.x)
+            }
+            if moveDog(dt, Pals.dogRun) == nil {
+                dogFacing = base.x > dogX ? 1 : -1
+                if onGround {
+                    jumpUntil = t + 0.35
+                    knockAt = t + 0.25
+                    dogMode = .petted
+                    dogUntil = t + 1.6
+                } else {
+                    dogMode = .bark
+                    dogUntil = t + 1.8
+                    knockAt = t + 1.6
+                    say("Woof! Woof!", over: .dog)
+                }
+            }
+        case .bark:
+            if t > dogUntil { newWanderTarget() }
+        case .nap:
+            dogTarget = clampX(meX + (dogX < meX ? -38 : 38))
+            if moveDog(dt, Pals.dogWalk) == nil { dogFacing = meX > dogX ? 1 : -1 }
+        }
+        if knockAt > 0 && t >= knockAt {
+            knockAt = -1
+            knockSnowman()
+        }
+    }
+
+    var dogRunningZoomies = false
+
+    @discardableResult
+    func moveDog(_ dt: CGFloat, _ speed: CGFloat) -> CGFloat? {
+        let moved = Companions.step(&dogX, to: dogTarget, speed: speed, dt: dt, facing: &dogFacing, ph: &dogPh,
+                                    stride: speed > Pals.dogWalk ? 9 : 6)
+        if let m = moved { footprint(dogX, &dogStepAcc, m, every: 8) }
+        return moved
+    }
+
+    func pickDogIdle(_ t: CGFloat) {
+        let r = CGFloat.random(in: 0...1)
+        if r < 0.35 {
+            dogMode = .sit
+            dogUntil = t + rnd(4, 9)
+        } else if r < 0.65 {
+            dogMode = .follow
+        } else {
+            newWanderTarget()
+            dogRunningZoomies = CGFloat.random(in: 0...1) < 0.2
+        }
+    }
+
+    func newWanderTarget() {
+        dogMode = .wander
+        dogTarget = openSpot(near: dogX, range: 260)
+    }
+
+    func cuddle(_ t: CGFloat, _ time: CGFloat) {
+        dogMode = .cuddle
+        dogUntil = t + time
+        meMode = .pet
+        meUntil = t + time
+        meFacing = dogX > meX ? 1 : -1
+        hearts(at: CGPoint(x: (dogX + meX) / 2, y: max(dogY, meY) + 60))
+    }
+
+    // MARK: Fetch toy
+
+    func launchToy() {
+        guard toy == nil, let tex = scene.ballTex else { return }
+        let n = SKSpriteNode(texture: tex)
+        n.size = CGSize(width: 9, height: 9)
+        n.zPosition = 6.7
+        n.position = CGPoint(x: meX - meFacing * 10, y: meY + 62)
+        scene.world.addChild(n)
+        toy = n
+        toyVel = CGVector(dx: meFacing * rnd(170, 250), dy: rnd(230, 300))
+        toyFlying = true
+        toyHeld = false
+        if dogFree {
+            dogMode = .chase
+            chaseBall = nil
+        }
+    }
+
+    func updateToy(_ dt: CGFloat, _ t: CGFloat) {
+        guard let n = toy else { return }
+        if toyHeld {
+            n.position = CGPoint(x: dogX + dogFacing * 33, y: dogY + 33)
+            return
+        }
+        guard toyFlying else { return }
+        toyVel.dy -= Cfg.gravity * 0.8 * dt
+        var p = n.position
+        p.x += toyVel.dx * dt
+        p.y += toyVel.dy * dt
+        let floor = groundY(p.x) + 4.5
+        if toyVel.dy < 0 && p.y <= floor {
+            p.y = floor
+            toyFlying = false        // resting on the snow until the beagle picks it up
+        }
+        n.position = p
+        if p.x < -20 || p.x > scene.size.width + 20 {
+            dropToy()
+            if dogMode == .chase { newWanderTarget() }
+        }
+    }
+
+    func dropToy() {
+        guard let n = toy else { return }
+        for _ in 0..<5 {
+            scene.spawnClump(at: n.position, vel: CGVector(dx: rnd(-60, 60), dy: rnd(40, 120)), sourceID: -3)
+        }
+        n.removeFromParent()
+        toy = nil
+        toyHeld = false
+        toyFlying = false
+    }
+
+    // MARK: Snowballs and snowmen (called by the scene)
+
+    func ballThrown(_ b: Snowball) {
+        guard enabled, !napping, ![.howl, .cuddle, .wreck, .fetchBack].contains(dogMode) else { return }
+        dropToy()
+        chaseBall = b
+        chaseX = b.x
+        dogMode = .chase
+    }
+
+    func snowmanBuilt(_ base: Snowball) {
+        snowmanBase = base
+        snowmanAt = scene.t
+    }
+
+    func snowmanStack() -> [Snowball]? {
+        guard let b = snowmanBase, scene.balls.contains(where: { $0 === b }), !b.falling, !b.dragging else { return nil }
+        let st = scene.stack(from: b)
+        guard st.count == 3, st[2].decor != nil else { return nil }
+        return st
+    }
+
+    func checkSnowman(_ t: CGFloat) {
+        guard snowmanBase != nil, dogMode != .wreck, t - snowmanAt > Pals.snowmanGrace, dogFree, !napping else { return }
+        if snowmanStack() == nil { snowmanBase = nil; return }
+        dogMode = .wreck
+    }
+
+    func knockSnowman() {
+        guard let st = snowmanStack() else { snowmanBase = nil; return }
+        let dir: CGFloat = st[0].x > dogX ? 1 : -1
+        for (i, b) in st.enumerated() {
+            b.drop(vel: CGVector(dx: dir * rnd(60, 150), dy: rnd(80, 160) + CGFloat(i) * 40))
+        }
+        snowmanBase = nil
+        say("Oops!", over: .dog)
+    }
+
+    // MARK: Clicks (called by the scene)
+
+    func dogRect() -> CGRect {
+        CGRect(x: dogX - (dogFacing > 0 ? 30 : 46), y: dogY, width: 76, height: 58)
+    }
+
+    func meRect() -> CGRect {
+        CGRect(x: meX - 17, y: meY, width: 36, height: 92)
+    }
+
+    func hit(_ m: CGPoint) -> Bool {
+        enabled && ((!dog.root.isHidden && dogRect().contains(m)) || (!me.root.isHidden && meRect().contains(m)))
+    }
+
+    /// Returns true if the click was on one of you (so the scene doesn't treat it as grabbing a snowball)
+    func mouseDown(at m: CGPoint) -> Bool {
+        guard enabled else { return false }
+        let t = scene.t
+        if !dog.root.isHidden && dogRect().contains(m) {
+            wake(t)
+            if toyHeld { dropToy() }
+            chaseBall = nil
+            if t - lastDogClick < Pals.howlWindow {
+                dogMode = .howl
+                dogUntil = t + 2.4
+                lastDogClick = -10
+                say("Awoooo! 🎶", over: .dog)
+                howlSound?.stop()
+                howlSound?.play()
+            } else {
+                dogMode = .petted
+                dogUntil = t + 1.6
+                lastDogClick = t
+                hearts(at: CGPoint(x: dogX + dogFacing * 18, y: dogY + 58))
+            }
+            return true
+        }
+        if !me.root.isHidden && meRect().contains(m) {
+            wake(t)
+            meMode = .wave
+            meUntil = t + 1.4
+            meFacing = dogX > meX ? 1 : -1
+            say(recipe.petName.isEmpty ? "Come here, buddy!" : "Come here, \(recipe.petName)!", over: .me)
+            if dogMode != .howl {
+                if toyHeld { dropToy() }
+                chaseBall = nil
+                dogMode = .comeToMe
+            }
+            return true
+        }
+        return false
+    }
+
+    lazy var howlSound: NSSound? = {
+        // Optional: put a short howl.m4a / .mp3 / .wav in assets/ (or the app's Resources) to hear it
+        var dirs: [URL] = []
+        if let r = Bundle.main.resourceURL { dirs.append(r) }
+        dirs.append(URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().appendingPathComponent("assets"))
+        for d in dirs {
+            for name in ["howl.m4a", "howl.mp3", "howl.wav", "howl.aiff"] {
+                let u = d.appendingPathComponent(name)
+                if FileManager.default.fileExists(atPath: u.path) { return NSSound(contentsOf: u, byReference: true) }
+            }
+        }
+        return nil
+    }()
+
+    // MARK: Napping and the eco frame rate
+
+    func checkActivity(_ t: CGFloat) {
+        let m = NSEvent.mouseLocation
+        if m != lastMouse {
+            lastMouse = m
+            lastActive = t
+            if napping { wake(t) }
+        } else if !napping && t - lastActive > Pals.napAfter {
+            napping = true
+            if enabled { startNap(t) }
+        }
+        if t > powerCheck {
+            powerCheck = t + 5
+            lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
+        }
+        let wantEco = napping || lowPower
+        if wantEco != eco {
+            eco = wantEco
+            scene.view?.preferredFramesPerSecond = eco ? Pals.ecoFPS : Pals.activeFPS
+            Cfg.pollInterval = eco ? Pals.ecoPoll : Pals.activePoll
+        }
+    }
+
+    func startNap(_ t: CGFloat) {
+        dropToy()
+        chaseBall = nil
+        meMode = .nap
+        dogMode = .nap
+        nextZ = t + 2
+    }
+
+    func wake(_ t: CGFloat) {
+        lastActive = t
+        guard napping else { return }
+        napping = false
+        if meMode == .nap { meMode = .idle; meUntil = t + rnd(1, 3) }
+        if dogMode == .nap {
+            dogMode = .petted        // a happy stretch and wag before wandering off
+            dogUntil = t + 1.2
+        }
+    }
+
+    // MARK: Poses
+
+    func poseDog(_ t: CGFloat) {
+        let r = dog
+        r.begin()
+        let s = sin(dogPh)
+        let jumping = t < jumpUntil
+        switch dogMode {
+        case .nap where abs(dogTarget - dogX) < 2:
+            r.put("body", "dog_sleep", yScale: 1 + 0.025 * sin(t * 2.2))
+        case .sit, .howl:
+            let howl = dogMode == .howl
+            r.put("tail", "dog_tail", dx: 6, dy: -16, rot: 1.25 + (howl ? 0 : 0.12 * sin(t * 5)))
+            r.put("body", "dog_sit")
+            r.put("head", howl ? "dog_head_howl" : "dog_head_open", dx: -7, dy: 6,
+                  rot: howl ? 0.55 + 0.04 * sin(t * 9) : 0.04 * sin(t * 1.3))
+        default:
+            let moving = abs(dogTarget - dogX) >= 2 && [.wander, .follow, .chase, .fetchBack, .comeToMe, .wreck, .nap].contains(dogMode)
+            let run = moving && (dogRunning || dogRunningZoomies)
+            let amp: CGFloat = moving ? (run ? 0.55 : 0.3) : 0
+            let ss = moving ? s : 0
+            var bob = abs(ss) * (run ? 2.5 : 0.8)
+            if jumping {
+                let k = (jumpUntil - t) / 0.4
+                bob += 14 * sin(.pi * min(1, max(0, 1 - k)))
+            }
+            let happy = [.petted, .cuddle].contains(dogMode)
+            let wag: CGFloat = happy ? 0.35 * sin(t * 18) : 0.25 * sin(run ? t * 10 : t * 4)
+            let tuck: CGFloat = jumping ? 0.5 : 0
+            r.put("farBack", "dog_far_back", dy: bob, rot: -ss * amp - tuck)
+            r.put("farFront", "dog_far_front", dy: bob, rot: ss * amp + tuck)
+            r.put("tail", "dog_tail", dy: bob, rot: wag)
+            r.put("body", "dog_body", dy: bob)
+            r.put("nearBack", "dog_near_back", dy: bob, rot: ss * amp - tuck)
+            r.put("nearFront", "dog_near_front", dy: bob, rot: -ss * amp + tuck)
+            let head: String
+            if dogMode == .bark { head = sin(t * 14) > 0 ? "dog_head_bark" : "dog_head_open" }
+            else if happy || run { head = "dog_head_happy" }
+            else { head = "dog_head_open" }
+            r.put("head", head, dy: bob, rot: moving ? 0.05 * ss : 0.05 * sin(t * 1.1))
+        }
+        r.end()
+    }
+
+    func poseMe(_ t: CGFloat) {
+        let r = me
+        r.begin()
+        let s = sin(mePh)
+        if t > blinkUntil + 3.5 && CGFloat.random(in: 0...1) < 0.01 { blinkUntil = t + 0.13 }
+        let blink = t < blinkUntil
+        switch meMode {
+        case .sit, .nap:
+            let asleep = meMode == .nap
+            r.put("armBack", "me_arm_back", dy: -14, rot: 0.5)
+            r.put("legBack", "me_sit_legs")
+            r.put("torso", "me_torso", dy: -14 + (asleep ? 0.4 * sin(t * 2) : 0))
+            r.put("head", asleep || blink ? "me_head_sleep" : "me_head_open", dy: -14, rot: asleep ? -0.12 : 0)
+            r.put("armFront", "me_arm_front", dy: -14, rot: 0.9)
+        default:
+            let walking = meMode == .walk
+            let amp: CGFloat = walking ? 0.45 : 0
+            let ss = walking ? s : 0
+            let bob = abs(ss) * 1.2
+            var armBack = -ss * amp * 0.8, armFront = ss * amp * 0.8
+            var head = blink ? "me_head_sleep" : "me_head_open"
+            switch meMode {
+            case .wave:
+                armBack = 0.3
+                armFront = 1.75 + 0.25 * sin(t * 14)
+                head = "me_head_call"
+            case .throwBall:
+                armBack = throwAt > 0 ? -2.2 : 0.6     // wind up, then follow through
+                armFront = 0.5
+            case .pet:
+                armBack = 0.2
+                armFront = 1.25 + 0.15 * sin(t * 6)
+                head = "me_head_happy"
+            default: break
+            }
+            r.put("armBack", "me_arm_back", dy: bob, rot: armBack)
+            r.put("legBack", "me_back_leg", rot: -ss * amp)
+            r.put("legFront", "me_front_leg", rot: ss * amp)
+            r.put("torso", "me_torso", dy: bob)
+            r.put("head", head, dy: bob, rot: walking ? 0.03 * ss : 0)
+            r.put("armFront", "me_arm_front", dy: bob, rot: armFront)
+        }
+        r.end()
+    }
+
+    // MARK: Speech bubbles and hearts
+
+    enum Who { case dog, me }
+
+    func say(_ text: String, over who: Who) {
+        let p = who == .dog ? CGPoint(x: dogX + dogFacing * 16, y: dogY + 74) : CGPoint(x: meX, y: meY + 104)
+        let label = SKLabelNode(text: text)
+        label.fontName = "HelveticaNeue-Bold"
+        label.fontSize = 12
+        label.fontColor = NSColor(calibratedRed: 0.24, green: 0.17, blue: 0.13, alpha: 1)
+        label.verticalAlignmentMode = .center
+        label.zPosition = 0.1
+        let w = label.frame.width + 16
+        let bubble = SKShapeNode(rect: CGRect(x: -w / 2, y: -10, width: w, height: 20), cornerRadius: 10)
+        bubble.fillColor = NSColor(calibratedWhite: 1, alpha: 0.94)
+        bubble.strokeColor = NSColor(calibratedRed: 0.24, green: 0.17, blue: 0.13, alpha: 0.7)
+        bubble.lineWidth = 1
+        bubble.addChild(label)
+        bubble.position = CGPoint(x: min(scene.size.width - w / 2 - 4, max(w / 2 + 4, p.x)), y: p.y)
+        bubble.zPosition = 9
+        scene.world.addChild(bubble)
+        bubble.run(.sequence([.wait(forDuration: 1.4),
+                              .group([.moveBy(x: 0, y: 12, duration: 0.5), .fadeOut(withDuration: 0.5)]),
+                              .removeFromParent()]))
+    }
+
+    func float(_ text: String, at p: CGPoint, size: CGFloat) {
+        let l = SKLabelNode(text: text)
+        l.fontName = "HelveticaNeue-Bold"
+        l.fontSize = size
+        l.fontColor = NSColor(calibratedRed: 0.45, green: 0.52, blue: 0.68, alpha: 1)
+        l.position = p
+        l.zPosition = 9
+        scene.world.addChild(l)
+        l.run(.sequence([.group([.moveBy(x: 8, y: 26, duration: 1.6), .fadeOut(withDuration: 1.6)]), .removeFromParent()]))
+    }
+
+    func hearts(at p: CGPoint) {
+        for i in 0..<3 {
+            let l = SKLabelNode(text: "❤️")
+            l.fontSize = 11 + CGFloat(i) * 2
+            l.position = CGPoint(x: p.x + rnd(-10, 10), y: p.y)
+            l.zPosition = 9
+            l.alpha = 0
+            scene.world.addChild(l)
+            l.run(.sequence([.wait(forDuration: Double(i) * 0.18),
+                             .group([.fadeIn(withDuration: 0.15), .moveBy(x: rnd(-8, 8), y: 30, duration: 1.1)]),
+                             .fadeOut(withDuration: 0.3),
+                             .removeFromParent()]))
+        }
+    }
+}
+
 // MARK: - Scene
 
 final class SnowScene: SKScene {
@@ -494,6 +1683,7 @@ final class SnowScene: SKScene {
     var dragVel = CGVector.zero
     var speckTex: SKTexture?
     static let dockID = -2
+    var pals: Companions?                        // you and your beagle
 
     override func didMove(to view: SKView) {
         backgroundColor = .clear
@@ -503,6 +1693,7 @@ final class SnowScene: SKScene {
         addChild(world)
         resetGround()
         for _ in 0..<Cfg.targetFlakes { spawnFlake(y: rnd(0, size.height)) }
+        pals = Companions(scene: self)
     }
 
     override func didChangeSize(_ oldSize: CGSize) {
@@ -618,6 +1809,7 @@ final class SnowScene: SKScene {
         updateMouseCapture()
         if let b = dragBall { stepDrag(b, dt) } else { updateRolling() }
         stepBalls(dt)
+        pals?.update(dt)
         if lightsOn {
             if lights.values.contains(where: { $0.animating(t) }) { updateLights() }   // smooth swing, every frame
             for s in lights.values {
@@ -672,7 +1864,8 @@ final class SnowScene: SKScene {
     /// does it catch clicks, so you can grab the ball without clicking the window underneath.
     func updateMouseCapture() {
         guard let w = view?.window else { return }
-        let capture = dragBall != nil || ballAt(NSEvent.mouseLocation) != nil
+        let m = NSEvent.mouseLocation
+        let capture = dragBall != nil || ballAt(m) != nil || (pals?.hit(m) ?? false)
         if w.ignoresMouseEvents == capture { w.ignoresMouseEvents = !capture }
     }
 
@@ -703,6 +1896,7 @@ final class SnowScene: SKScene {
 
     override func mouseDown(with event: NSEvent) {
         let m = event.location(in: self)
+        if pals?.mouseDown(at: m) == true { return }     // petting / calling comes first
         guard let b = ballAt(m) else { return }
         // Anything stacked on top of the grabbed ball tumbles off
         var a = above(b)
@@ -741,6 +1935,7 @@ final class SnowScene: SKScene {
             // Let go: it falls (with a bit of the throw) and lands on whatever is below
             b.drop(vel: CGVector(dx: max(-600, min(600, dragVel.dx * 0.5)),
                                  dy: max(-400, min(400, dragVel.dy * 0.5))))
+            pals?.ballThrown(b)                 // the beagle chases it
         }
     }
 
@@ -848,6 +2043,7 @@ final class SnowScene: SKScene {
         }
         body.node.addChild(bd)
         body.decor = bd
+        pals?.snowmanBuilt(st[0])               // ...the beagle has plans for it
     }
 
     // MARK: Snowballs
@@ -1312,6 +2508,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var pauseItem: NSMenuItem!
     var lightsItem: NSMenuItem!
+    var palsItem: NSMenuItem!
     var amountItems: [NSMenuItem] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1380,7 +2577,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let amount = NSMenuItem(title: "Snow Amount", action: nil, keyEquivalent: "")
         let sub = NSMenu()
-        for (title, n) in [("Light", 120), ("Medium", 260), ("Heavy", 500)] {
+        for (title, n) in [("None", 0), ("Light", 120), ("Medium", 260), ("Heavy", 500)] {
             let it = NSMenuItem(title: title, action: #selector(setAmount(_:)), keyEquivalent: "")
             it.target = self
             it.tag = n
@@ -1390,6 +2587,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         amount.submenu = sub
         menu.addItem(amount)
+
+        palsItem = NSMenuItem(title: "Beagle & Me 🐶", action: #selector(togglePals), keyEquivalent: "b")
+        palsItem.target = self
+        palsItem.state = (scene.pals?.enabled ?? true) ? .on : .off
+        menu.addItem(palsItem)
 
         lightsItem = NSMenuItem(title: "Fairy Lights ✨", action: #selector(toggleLights), keyEquivalent: "l")
         lightsItem.target = self
@@ -1440,12 +2642,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ⛄  Build a snowman: stack three snowballs
         🪟  Make snow fly: drag a window
         ✨  Hang fairy lights: ❄︎ menu → Fairy Lights
+        🐶  Pet the beagle: click it (click twice quickly to make it howl)
+        🙋  Call the beagle over: click yourself
+        ⛄  Watch out: the beagle can't resist a fresh snowman
 
         Find everything under the ❄︎ in your menu bar. To get snow on the Dock too, allow this app in System Settings → Privacy & Security → Accessibility.
         """
         alert.addButton(withTitle: "Let it snow!")
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
+    }
+
+    @objc func togglePals() {
+        guard let pals = scene.pals else { return }
+        pals.setEnabled(!pals.enabled)
+        palsItem.state = pals.enabled ? .on : .off
     }
 
     @objc func toggleLights() {

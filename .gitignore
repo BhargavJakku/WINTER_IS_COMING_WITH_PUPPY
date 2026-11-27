@@ -12,3 +12,4 @@ windows/obj/
 *.new
 .DS_Store
 .vscode/
+_archive/
