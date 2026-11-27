@@ -702,14 +702,14 @@ enum PalsShape {
     static func rr(_ x0: CGFloat, _ y0: CGFloat, _ x1: CGFloat, _ y1: CGFloat, _ r: CGFloat) -> CGPath { PalsShape.rr(x0, y0, x1, y1, r) }
     static func path(_ build: (CGMutablePath) -> Void) -> CGPath { PalsShape.path(build) }
 
-    /// Measure, then paint one part into a texture
-    static func render(pivot: CGPoint, ink: PalsInk, _ draw: (PalsPainter) -> Void) -> PalsPart {
+    /// Measure, then paint one part into a texture. `k` enlarges the drawing (it is redrawn bigger, not stretched).
+    static func render(pivot: CGPoint, ink: PalsInk, scale k: CGFloat = 1, _ draw: (PalsPainter) -> Void) -> PalsPart {
         let measure = PalsPainter(ctx: nil, ink: ink)
         draw(measure)
         let b = measure.bounds.isNull ? CGRect(x: 0, y: 0, width: 1, height: 1) : measure.bounds
         let x0 = floor(b.minX) - 1, y0 = floor(b.minY) - 1
         let w = ceil(b.maxX) + 1 - x0, h = ceil(b.maxY) + 1 - y0
-        let S = Pals.renderScale
+        let S = (k > 1 ? 2 : Pals.renderScale) * k        // big drawings only need 2x to look sharp
         let pw = Int(w * S), ph = Int(h * S)
         guard let ctx = CGContext(data: nil, width: pw, height: ph, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpaceCreateDeviceRGB(),
@@ -724,9 +724,9 @@ enum PalsShape {
         guard let img = ctx.makeImage() else {
             return PalsPart(tex: SKTexture(), size: CGSize(width: 1, height: 1), anchor: .zero, base: .zero)
         }
-        return PalsPart(tex: SKTexture(cgImage: img), size: CGSize(width: w, height: h),
+        return PalsPart(tex: SKTexture(cgImage: img), size: CGSize(width: w * k, height: h * k),
                         anchor: CGPoint(x: (pivot.x - x0) / w, y: 1 - (pivot.y - y0) / h),
-                        base: CGPoint(x: pivot.x, y: -pivot.y))
+                        base: CGPoint(x: pivot.x * k, y: -pivot.y * k))
     }
 
     // MARK: Pet (faces right)
@@ -1026,6 +1026,12 @@ enum PalsShape {
     var embers: [SKSpriteNode] = []
     var treeLights: [SKSpriteNode] = []
     var starGlow = SKSpriteNode()
+    var treeStar = SKSpriteNode()
+    var sparkle = SKSpriteNode()
+    var lightCores: [SKSpriteNode] = []
+    var lightPhase: [CGFloat] = []
+    var lightSpeed: [CGFloat] = []
+    var treeScale: CGFloat = 1
     var fireX: CGFloat = 0
     var treeX: CGFloat = 0
     var fireOn = UserDefaults.standard.object(forKey: "campfire") as? Bool ?? true
@@ -1080,13 +1086,16 @@ enum PalsShape {
 
     func groundY(_ x: CGFloat) -> CGFloat {
         guard let g = scene.ground, let c = g.col(at: x) else { return 0 }
-        return max(0, g.topY + g.h[c] - Pals.sink)
+        var y = max(0, g.topY + g.h[c] - Pals.sink)
+        // if the Dock pops up underneath, ride up and stand on its snow
+        if let d = scene.dockPile, let dc = d.col(at: x) { y = max(y, d.surface(dc) - Pals.sink) }
+        return y
     }
 
     /// Somewhere on the ground that isn't behind a window or the Dock
     func visible(_ x: CGFloat) -> Bool {
         guard let g = scene.ground, let c = g.col(at: x), !g.occ[c] else { return false }
-        if let d = scene.dockRect, x > d.minX - 10, x < d.maxX + 10 { return false }
+        if let d = scene.dockRect ?? scene.dockZone, x > d.minX - 10, x < d.maxX + 10 { return false }
         return true
     }
 
@@ -1808,7 +1817,20 @@ extension PalsArt {
             p.blob([ell(x, y, 2.4, 2.4)], col)
             p.dot(x - 0.8, y - 0.8, 0.7, palsRGB(255, 255, 255, 0.85))
         }
+    }
+
+    static func treeStar(_ p: PalsPainter) {
         p.blob([starPath(0, -96, 8.5, 3.8)], palsRGB(255, 206, 64))
+        p.dot(-2.2, -98.5, 1.2, palsRGB(255, 255, 255, 0.8))
+    }
+
+    /// A four-pointed glint that flashes on the star
+    static func sparkle(_ p: PalsPainter) {
+        let pts: [(CGFloat, CGFloat)] = [(0, -7), (1.3, -1.3), (7, 0), (1.3, 1.3), (0, 7), (-1.3, 1.3), (-7, 0), (-1.3, -1.3)]
+        p.blob([path { pth in
+            for (i, (x, y)) in pts.enumerated() { if i == 0 { pth.m(x, y) } else { pth.l(x, y) } }
+            pth.z()
+        }], palsRGB(255, 255, 240), outline: false)
     }
 
     static func buildScenery() -> [String: PalsPart] {
@@ -1819,7 +1841,16 @@ extension PalsArt {
         parts["flame_mid"] = render(pivot: CGPoint(x: 0, y: -6), ink: ink) { flame($0, w: 7.5, h: 21, palsRGB(255, 190, 60), outline: false) }
         parts["flame_core"] = render(pivot: CGPoint(x: 0, y: -6), ink: ink) { flame($0, w: 4.2, h: 12, palsRGB(255, 238, 160), outline: false) }
         parts["fire_glow"] = render(pivot: CGPoint(x: 0, y: -14), ink: ink) { $0.glow(0, -14, 40, palsRGB(255, 178, 76), 0.35) }
-        parts["tree"] = render(pivot: .zero, ink: ink) { tree($0) }
+        return parts
+    }
+
+    /// The tree, drawn k times bigger than its design size (about 104 points tall)
+    static func buildTree(scale k: CGFloat) -> [String: PalsPart] {
+        let ink = PalsInk(PalsRecipe())
+        var parts: [String: PalsPart] = [:]
+        parts["tree"] = render(pivot: .zero, ink: ink, scale: k) { tree($0) }
+        parts["tree_star"] = render(pivot: CGPoint(x: 0, y: -96), ink: ink, scale: k) { treeStar($0) }
+        parts["sparkle"] = render(pivot: .zero, ink: ink, scale: k) { sparkle($0) }
         return parts
     }
 }
@@ -1851,8 +1882,6 @@ extension Companions {
         let logs = sprite("fire_base")
         logs.zPosition = 0.05
         fireNode.addChild(logs)
-        let treeSprite = sprite("tree")
-        treeNode.addChild(treeSprite)
         if let tex = scene.tex {
             for _ in 0..<3 {
                 let e = SKSpriteNode(texture: tex)
@@ -1863,24 +1892,8 @@ extension Companions {
                 embers.append(e)
                 fireNode.addChild(e)
             }
-            starGlow = SKSpriteNode(texture: tex)
-            starGlow.size = CGSize(width: 36, height: 36)
-            starGlow.color = NSColor(calibratedRed: 1, green: 0.85, blue: 0.3, alpha: 1)
-            starGlow.colorBlendFactor = 1
-            starGlow.position = CGPoint(x: 0, y: 96)
-            starGlow.zPosition = -0.05
-            treeNode.addChild(starGlow)
-            for (i, (x, y)) in PalsArt.treeLights.enumerated() {
-                let l = SKSpriteNode(texture: tex)
-                l.size = CGSize(width: 10, height: 10)
-                l.color = LightString.colors[i % LightString.colors.count]
-                l.colorBlendFactor = 1
-                l.position = CGPoint(x: x, y: -y)
-                l.zPosition = 0.1
-                treeLights.append(l)
-                treeNode.addChild(l)
-            }
         }
+        buildTree()
         fireNode.zPosition = 6.58      // between you and the beagle
         treeNode.zPosition = 6.45      // behind everyone
         scene.world.addChild(fireNode)
@@ -1891,6 +1904,66 @@ extension Companions {
         nextCampfire = scene.t + rnd(60, 120)        // the first campfire comes soon so you get to see it
         setFire(fireOn)
         setTree(treeOn)
+    }
+
+    /// (Re)build the tree a third of the screen tall, with its lights, star and sparkle
+    func buildTree() {
+        let k = max(1, scene.size.height / 3 / 104)
+        treeScale = k
+        treeNode.removeAllChildren()
+        treeLights.removeAll()
+        lightCores.removeAll()
+        lightPhase.removeAll()
+        lightSpeed.removeAll()
+        let parts = PalsArt.buildTree(scale: k)
+        func sprite(_ name: String) -> SKSpriteNode {
+            let n = SKSpriteNode()
+            if let p = parts[name] {
+                n.texture = p.tex
+                n.size = p.size
+                n.anchorPoint = p.anchor
+                n.position = p.base
+            }
+            return n
+        }
+        treeNode.addChild(sprite("tree"))
+        guard let tex = scene.tex else { return }
+        starGlow = SKSpriteNode(texture: tex)
+        starGlow.size = CGSize(width: 46 * k, height: 46 * k)
+        starGlow.color = NSColor(calibratedRed: 1, green: 0.85, blue: 0.3, alpha: 1)
+        starGlow.colorBlendFactor = 1
+        starGlow.position = CGPoint(x: 0, y: 96 * k)
+        starGlow.zPosition = -0.05
+        treeNode.addChild(starGlow)
+        treeStar = sprite("tree_star")
+        treeStar.zPosition = 0.2
+        treeNode.addChild(treeStar)
+        sparkle = sprite("sparkle")
+        sparkle.position = CGPoint(x: 5 * k, y: 101 * k)
+        sparkle.zPosition = 0.3
+        sparkle.alpha = 0
+        treeNode.addChild(sparkle)
+        for (i, (x, y)) in PalsArt.treeLights.enumerated() {
+            let color = LightString.colors[i % LightString.colors.count]
+            let glow = SKSpriteNode(texture: tex)
+            glow.size = CGSize(width: 12 * k, height: 12 * k)
+            glow.color = color
+            glow.colorBlendFactor = 1
+            glow.position = CGPoint(x: x * k, y: -y * k)
+            glow.zPosition = 0.1
+            let core = SKSpriteNode(texture: tex)
+            core.size = CGSize(width: 3.6 * k, height: 3.6 * k)
+            core.color = color.blended(withFraction: 0.55, of: .white) ?? color
+            core.colorBlendFactor = 1
+            core.position = glow.position
+            core.zPosition = 0.11
+            treeLights.append(glow)
+            lightCores.append(core)
+            lightPhase.append(rnd(0, 6.28))
+            lightSpeed.append(rnd(1.6, 3.4))
+            treeNode.addChild(glow)
+            treeNode.addChild(core)
+        }
     }
 
     func setFire(_ on: Bool) {
@@ -1912,20 +1985,39 @@ extension Companions {
             propsCheck = t + 3
             // move them if a window or the Dock now covers their spot
             if !visible(treeX) { treeX = openSpot(near: w * 0.85, range: w * 0.4) }
-            if !visible(fireX) || abs(fireX - treeX) < 70 {
+            let gap = 40 + 32 * treeScale             // keep the fire clear of the tree
+            if !visible(fireX) || abs(fireX - treeX) < gap {
                 let nx = openSpot(near: w * 0.6, range: w * 0.35)
-                if visible(nx) && abs(nx - treeX) >= 70 {
+                if visible(nx) && abs(nx - treeX) >= gap {
                     fireX = nx
                     if inCampfire { endCampfire(t) }
                 }
             }
         }
         if treeOn {
+            let k = max(1, scene.size.height / 3 / 104)
+            if abs(k - treeScale) > 0.01 { buildTree() }   // the screen changed size
+            treeX = min(max(treeX, 34 * treeScale), w - 34 * treeScale)   // keep the whole tree on screen
             treeNode.position = CGPoint(x: treeX, y: groundY(treeX))
             treeNode.isHidden = !onOpenGround(treeX)
             if !treeNode.isHidden {
-                for (i, l) in treeLights.enumerated() { l.alpha = 0.55 + 0.45 * sin(t * 2.3 + CGFloat(i) * 1.7) }
-                starGlow.alpha = 0.45 + 0.15 * sin(t * 1.6)
+                // each bulb twinkles at its own pace: dim → bright, with a little pulse
+                for i in 0..<treeLights.count {
+                    let k = 0.5 + 0.5 * sin(t * lightSpeed[i] + lightPhase[i])
+                    let b = k * k
+                    treeLights[i].alpha = 0.12 + 0.88 * b
+                    treeLights[i].setScale(0.75 + 0.45 * b)
+                    lightCores[i].alpha = 0.3 + 0.7 * b
+                }
+                // the star breathes and now and then a sparkle flashes on it
+                let tw = 0.5 + 0.5 * sin(t * 2.4)
+                treeStar.setScale(1 + 0.08 * tw)
+                starGlow.alpha = 0.25 + 0.6 * tw
+                starGlow.setScale(0.8 + 0.35 * tw)
+                let flash = pow(max(0, sin(t * 1.9)), 10)
+                sparkle.alpha = flash
+                sparkle.setScale(0.5 + 0.7 * flash)
+                sparkle.zRotation = t * 0.8
             }
         }
         guard fireOn else { return }
@@ -2028,6 +2120,8 @@ final class SnowScene: SKScene {
     let dockTracker = DockTracker()
     var dockPile: Pile?
     var dockRect: CGRect?
+    var dockZone: CGRect?                        // where the Dock sits, remembered even while it is auto-hidden
+    var savedDockSnow: [CGFloat]?                // the Dock's snow while it is hidden, restored when it pops up
     var dockAcc: CGFloat = 1
     var lastDockStatus = ""
     var lights: [Int: LightString] = [:]
@@ -2695,9 +2789,10 @@ final class SnowScene: SKScene {
         }
         order = newOrder
 
-        // The Dock rarely changes; checking every 0.5 s is enough
+        // The Dock rarely changes; checking every 0.5 s is enough, except while the mouse is near the
+        // bottom edge, where an auto-hidden Dock pops up
         dockAcc += dt
-        if dockAcc >= 0.5 {
+        if dockAcc >= (NSEvent.mouseLocation.y < 40 ? 0.1 : 0.5) {
             dockAcc = 0
             updateDock()
         }
@@ -2715,6 +2810,7 @@ final class SnowScene: SKScene {
         if let f = dockTracker.frame() {
             var s = CGRect(x: f.minX - Cfg.dockPad, y: size.height - f.maxY,
                            width: f.width + 2 * Cfg.dockPad, height: f.height)
+            if f.width > f.height { dockZone = CGRect(x: s.minX, y: 0, width: s.width, height: max(s.height, 40)) }
             // The AX frame can reach a bit above the visible Dock shelf. When the Dock is always
             // shown, the space macOS reserves for it (bottom of visibleFrame) is a better top edge.
             if let screen = NSScreen.screens.first {
@@ -2742,16 +2838,31 @@ final class SnowScene: SKScene {
            abs(old.minX - r.minX) < 0.5, abs(old.width - r.width) < 0.5, abs(old.maxY - r.maxY) < 0.5 {
             return
         }
-        // Dock resized (new app opened, magnification): drop its snow and start again
         if let p = dockPile {
-            release(p, vel: .zero, id: SnowScene.dockID)
+            if r == nil {
+                // The Dock slid away (auto-hide): keep its snow for when it pops up again
+                savedDockSnow = p.h
+            } else {
+                // Dock resized (new app opened, magnification): drop its snow and start again
+                release(p, vel: .zero, id: SnowScene.dockID)
+            }
             p.remove()
             dockPile = nil
         }
         dockRect = r
         if let r = r {
-            dockPile = Pile(minX: r.minX, topY: r.maxY + Cfg.dockTopOffset, width: r.width,
-                            maxH: Cfg.dockPileMax, parent: world)
+            let p = Pile(minX: r.minX, topY: r.maxY + Cfg.dockTopOffset, width: r.width,
+                         maxH: Cfg.dockPileMax, parent: world)
+            // Bring back the snow it had (stretched if the Dock changed width), and never show up bare
+            let saved = savedDockSnow ?? []
+            for c in 0..<p.count {
+                let old = saved.isEmpty ? 0 : saved[min(saved.count - 1, c * saved.count / max(1, p.count))]
+                p.h[c] = min(p.caps[c], max(old, p.caps[c] * 0.5))
+            }
+            p.dirty = true
+            p.redraw()
+            savedDockSnow = nil
+            dockPile = p
         }
     }
 
