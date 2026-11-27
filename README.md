@@ -58,7 +58,7 @@ Everything lives in the ❄︎ menu in the menu bar: pause, snow amount, **Pet &
 
 Made to run all day on an 8 GB laptop:
 
-- You, your pet, the tree and the campfire are drawn once when the app starts (a few milliseconds, about 2 MB) and then just moved around. No images, video or heavy effects
+- You, your pet, the tree and the campfire are drawn once when the app starts (a few milliseconds, a few MB of memory) and then just moved around. No images, video or heavy effects
 - While you nap, the whole app drops from 60 to 30 frames per second and checks your windows less often. It does the same in Low Power Mode
 - Everything stops drawing while your display sleeps or the snow is paused
 
