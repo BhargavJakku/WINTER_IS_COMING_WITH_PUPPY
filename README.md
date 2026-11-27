@@ -31,7 +31,7 @@ Don't worry, the app never connects to the internet, and all of its code is righ
 - **Roll a snowball**: move your mouse sideways over the snow, no clicking needed
 - **Push it**: roll one snowball into another and give it a nudge
 - **Carry it**: hold the left mouse button on a snowball and take it anywhere
-- **Build a snowman**: stack three snowballs, and he gets a carrot nose and a red scarf ⛄ (in this edition, one of six outfits at random: top hat, cozy beanie, earmuffs, Santa, backwards cap or wizard)
+- **Build a snowman**: stack three snowballs and he comes to life with a carrot nose ⛄. In this edition he gets one of six outfits at random: top hat, cozy beanie with mittens, earmuffs, Santa, backwards cap or wizard with a broom
 - **Hang fairy lights**: turn them on from the menu and watch them swing into place
 
 **Pet & Me** (new in this edition)
@@ -44,7 +44,7 @@ Don't worry, the app never connects to the internet, and all of its code is righ
 - **Campfire time** 🔥: now and then you both sit by the fire for a couple of minutes and your pet dozes off. Click the fire to start it right away. It melts the snow around it, and any snowball you roll into it
 - **Christmas tree** 🎄: a third of your screen tall, with twinkling lights and a sparkling star
 - **Naps**: leave the mouse alone for a minute and you both doze off; move it and you wake up
-- **Wind moods** 🌬️: the wind drifts between a gentle breeze, a moderate wind and strong gusts. When a gust hits, you wrap up in a flapping striped scarf and your pet puts on its red knit sweater
+- **Wind moods** 🌬️: the wind drifts at random between a gentle breeze, a moderate wind and short strong gusts (about one a minute on average). When a gust hits, you wrap up in a flapping striped scarf and your pet puts on its red knit sweater, and you take them off about 20 seconds after it calms down
 
 **Little extras**
 
@@ -82,8 +82,69 @@ When you run it with `build.sh`, the Accessibility permission for Dock snow belo
 ## 🎨 Make it yours
 
 - **Settings**: the snow settings live at the top of `WinterIsComing.swift` (`Cfg`), and the Pet & Me settings right below the "Pet & me" heading (`Pals`): walking speeds, how long until a nap, how often you throw snowballs, how long your pet lets a snowman stand. Change a number and run it again
-- **Your look and your pet's**: colors live in `PalsRecipe` (skin, hair, beanie, jacket, your pet's coat, markings, ears, saddle). An easy in-app Customize window is planned
+- **Your look and your pet's**: see **Put yourself and your pet in it** below
+- **Wind**: for more or fewer strong gusts, change `0.78` in `stepWind` (lower = more gusts, e.g. `0.60`; higher = fewer, e.g. `0.90`)
 - **The howl**: replace `assets/howl.wav` with a recording of your own pet (`howl.m4a`, `.mp3`, `.wav` or `.aiff` all work)
+
+## 🐾 Put yourself and your pet in it (with Claude)
+
+You don't have to draw anything. Claude looks at your photos and writes a short **recipe** of colors, and the app draws you and your pet from it in the same smooth sticker style.
+
+**1. Ask Claude for your recipe.** Go to [claude.ai](https://claude.ai), attach 2–4 photos (you from head to toe, and your pet from the side if you can), and paste this prompt:
+
+````text
+I use the WinterIsComing "Pet & Me" Mac app, which draws me and my pet as cute,
+smooth sticker-style cartoons on the snow. The shapes are fixed (a person in a
+beanie and puffer jacket, and a floppy-eared dog); the colors come from this
+Swift "recipe". Look at my attached photos and fill it in.
+
+Rules:
+- Every color is a hex string like "#A0522D".
+- skin: my skin tone. hair: my hair color.
+- hat: my beanie color (from the photos, or one that suits me).
+- jacket, collar, pants, boots: from my winter clothes in the photos, or colors that go well together.
+- coat: my pet's main fur color (body, legs, muzzle).
+- markings: the color of its head patches, thigh/shoulder patches and tail.
+- ears: its ear color (a little darker than markings looks best).
+- saddle: the dark patch on its back; if it has none, use the same color as coat.
+- blaze: true if it has a light stripe down the middle of its face, otherwise false.
+- meName: my first name. petName: my pet's name.
+
+Reply with ONLY the filled-in code block, nothing else:
+
+```swift
+struct PalsRecipe {
+    var meName = ""
+    var skin = "#"
+    var hair = "#"
+    var hat = "#"          // beanie
+    var jacket = "#"
+    var collar = "#"
+    var pants = "#"
+    var boots = "#"
+
+    var petName = ""             // shown in the speech bubbles
+    var coat = "#"               // main fur: body, legs, muzzle
+    var markings = "#"           // head, thigh and shoulder patches, tail
+    var ears = "#"
+    var saddle = "#"             // the dark patch on the back
+    var blaze = true             // light stripe down the middle of the face
+}
+```
+````
+
+**2. Paste it into the code.** Open `WinterIsComing.swift` in any text editor, search for `struct PalsRecipe` (⌘F), and replace that whole block, from `struct PalsRecipe {` down to its closing `}`, with the one Claude gave you.
+
+**3. Build it.**
+
+```sh
+zsh build.sh            # try it out
+zsh make_app.sh 1.0     # then make your own app for Applications
+```
+
+**What changes:** all the colors (skin, hair, beanie, jacket, collar, pants, boots, your pet's coat, markings, ears and back patch), the face stripe, and the names in the speech bubbles. **What stays the same for now:** the shapes, so everyone gets curly hair under a beanie and a floppy-eared, beagle-shaped pet. More hair styles, ears, tails and pets are planned.
+
+Not quite right? Change a hex color by hand, or ask Claude something like "make the jacket darker" or "the ears should be black" and paste the new recipe in again.
 
 ## 💙 Credits & License
 
