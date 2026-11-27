@@ -15,7 +15,8 @@ enum Cfg {
     static var targetFlakes = 260            // number of flakes falling at the same time
     static let colW: CGFloat = 3             // width of one column of the snow height map (px)
     static let windowPileMax: CGFloat = 16   // max snow height on top of a window
-    static let groundPileMax: CGFloat = 34   // max snow height at the bottom of the screen
+    static let groundPileMax: CGFloat = 56   // max snow height at the bottom of the screen
+    static let groundStart: CGFloat = 0.45    // the ground starts this full (0...1) so there is snow right away
     static let gravity: CGFloat = 900        // gravity for snow sliding off
     static var pollInterval = 1.0 / 30.0     // how often window positions are checked (s); slower while napping
     static let maxClumps = 900               // max number of falling snow clumps at once
@@ -640,6 +641,18 @@ final class PalsPainter {
         c.fillEllipse(in: rect)
     }
 
+    /// A soft round glow (campfire light)
+    func glow(_ x: CGFloat, _ y: CGFloat, _ radius: CGFloat, _ color: CGColor, _ alpha: CGFloat) {
+        let rect = CGRect(x: x - radius, y: y - radius, width: 2 * radius, height: 2 * radius)
+        guard let c = ctx else { bounds = bounds.union(rect); return }
+        let center = color.copy(alpha: alpha) ?? color
+        let edge = color.copy(alpha: 0) ?? color
+        guard let g = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: [center, edge] as CFArray,
+                                 locations: [0, 1]) else { return }
+        c.drawRadialGradient(g, startCenter: CGPoint(x: x, y: y), startRadius: 0,
+                             endCenter: CGPoint(x: x, y: y), endRadius: radius, options: [])
+    }
+
     /// Eyes: "open" (dot with a shine), "happy" (^ ^) or "closed" (sleepy curve)
     func eyes(_ pts: [(CGFloat, CGFloat)], _ kind: String, r: CGFloat) {
         for (x, y) in pts {
@@ -956,8 +969,8 @@ enum PalsShape {
 }
 
 @MainActor final class Companions {
-    enum DogMode { case wander, sit, follow, chase, fetchBack, comeToMe, cuddle, petted, howl, wreck, bark, nap }
-    enum MeMode { case idle, walk, sit, wave, throwBall, pet, nap }
+    enum DogMode { case wander, sit, follow, chase, fetchBack, comeToMe, cuddle, petted, howl, wreck, bark, nap, toFire, byFire }
+    enum MeMode { case idle, walk, sit, wave, throwBall, pet, nap, toFire, byFire }
 
     unowned let scene: SnowScene
     var recipe = PalsRecipe()
@@ -1005,6 +1018,27 @@ enum PalsShape {
     var lowPower = false
     var nextZ: CGFloat = 0
 
+    // campfire and Christmas tree
+    let fireNode = SKNode()
+    let treeNode = SKNode()
+    var flames: [SKSpriteNode] = []
+    var fireGlow = SKSpriteNode()
+    var embers: [SKSpriteNode] = []
+    var treeLights: [SKSpriteNode] = []
+    var starGlow = SKSpriteNode()
+    var fireX: CGFloat = 0
+    var treeX: CGFloat = 0
+    var fireOn = UserDefaults.standard.object(forKey: "campfire") as? Bool ?? true
+    var treeOn = UserDefaults.standard.object(forKey: "xmasTree") as? Bool ?? true
+    var propsCheck: CGFloat = 0
+    var meltAt: CGFloat = 0
+    var fireDim: CGFloat = 1
+    var inCampfire = false
+    var nextCampfire: CGFloat = 0
+    var campfireEnds: CGFloat = 0
+    var dogFireSince: CGFloat = 0
+    var fireSide: CGFloat = 1            // which side of the fire you sit on (the beagle takes the other)
+
     init(scene: SnowScene) {
         self.scene = scene
         let parts = PalsArt.build(PalsRecipe())
@@ -1023,6 +1057,7 @@ enum PalsShape {
         lastMouse = NSEvent.mouseLocation
         lastActive = scene.t
         setEnabled(enabled)
+        setupScenery()
     }
 
     func setEnabled(_ on: Bool) {
@@ -1099,13 +1134,16 @@ enum PalsShape {
     func update(_ dt: CGFloat) {
         let t = scene.t
         checkActivity(t)
-        guard enabled, scene.ground != nil else { return }
+        guard scene.ground != nil else { return }
+        updateScenery(t)
+        guard enabled else { return }
         meX = clampX(meX)          // the screen may have changed size
         dogX = clampX(dogX)
         updateToy(dt, t)
         updateMe(dt, t)
         updateDog(dt, t)
         checkSnowman(t)
+        checkCampfire(t)
         // settle onto the snow surface
         dogY += (groundY(dogX) - dogY) * min(1, dt * 10)
         meY += (groundY(meX) - meY) * min(1, dt * 10)
@@ -1151,7 +1189,24 @@ enum PalsShape {
                 meUntil = t + rnd(3, 8)
             }
         case .wave, .throwBall, .pet:
-            if t > meUntil { meMode = .idle; meUntil = t + rnd(2, 5) }
+            if t > meUntil {
+                if inCampfire {
+                    meMode = .toFire                    // back to the fire
+                    meTarget = clampX(fireX + fireSide * 34)
+                } else {
+                    meMode = .idle
+                    meUntil = t + rnd(2, 5)
+                }
+            }
+        case .toFire:
+            if let moved = Companions.step(&meX, to: meTarget, speed: Pals.meWalk, dt: dt, facing: &meFacing, ph: &mePh, stride: 7) {
+                footprint(meX, &meStepAcc, moved, every: 11)
+            } else {
+                meMode = .byFire
+                meFacing = fireX > meX ? 1 : -1
+            }
+        case .byFire:
+            break
         case .nap:
             break
         }
@@ -1261,9 +1316,18 @@ enum PalsShape {
             }
         case .bark:
             if t > dogUntil { newWanderTarget() }
+        case .toFire, .byFire:
+            break                                   // handled below
         case .nap:
             dogTarget = clampX(meX + (dogX < meX ? -38 : 38))
             if moveDog(dt, Pals.dogWalk) == nil { dogFacing = meX > dogX ? 1 : -1 }
+        }
+        if dogMode == .toFire {
+            if moveDog(dt, Pals.dogWalk) == nil {
+                dogMode = .byFire
+                dogFireSince = t
+                dogFacing = fireX > dogX ? 1 : -1
+            }
         }
         if knockAt > 0 && t >= knockAt {
             knockAt = -1
@@ -1295,6 +1359,11 @@ enum PalsShape {
     }
 
     func newWanderTarget() {
+        if inCampfire && fireOn {
+            dogMode = .toFire                       // go back to the campfire
+            dogTarget = clampX(fireX - fireSide * 42)
+            return
+        }
         dogMode = .wander
         dogTarget = openSpot(near: dogX, range: 260)
     }
@@ -1410,7 +1479,8 @@ enum PalsShape {
     }
 
     func hit(_ m: CGPoint) -> Bool {
-        enabled && ((!dog.root.isHidden && dogRect().contains(m)) || (!me.root.isHidden && meRect().contains(m)))
+        enabled && ((!dog.root.isHidden && dogRect().contains(m)) || (!me.root.isHidden && meRect().contains(m))
+                    || fireClickable(m))
     }
 
     /// Returns true if the click was on one of you (so the scene doesn't treat it as grabbing a snowball)
@@ -1447,6 +1517,11 @@ enum PalsShape {
                 chaseBall = nil
                 dogMode = .comeToMe
             }
+            return true
+        }
+        if fireClickable(m) {
+            wake(t)
+            if !inCampfire { startCampfire(t) }     // click the fire: campfire time right now
             return true
         }
         return false
@@ -1502,7 +1577,15 @@ enum PalsShape {
         lastActive = t
         guard napping else { return }
         napping = false
-        if meMode == .nap { meMode = .idle; meUntil = t + rnd(1, 3) }
+        if meMode == .nap {
+            if inCampfire {
+                meMode = .toFire
+                meTarget = clampX(fireX + fireSide * 34)
+            } else {
+                meMode = .idle
+                meUntil = t + rnd(1, 3)
+            }
+        }
         if dogMode == .nap {
             dogMode = .petted        // a happy stretch and wag before wandering off
             dogUntil = t + 1.2
@@ -1519,14 +1602,16 @@ enum PalsShape {
         switch dogMode {
         case .nap where abs(dogTarget - dogX) < 2:
             r.put("body", "dog_sleep", yScale: 1 + 0.025 * sin(t * 2.2))
-        case .sit, .howl:
+        case .byFire where t - dogFireSince > 10:
+            r.put("body", "dog_sleep", yScale: 1 + 0.025 * sin(t * 2.2))    // dozing off by the fire
+        case .sit, .howl, .byFire:
             let howl = dogMode == .howl
             r.put("tail", "dog_tail", dx: 6, dy: -16, rot: 1.25 + (howl ? 0 : 0.12 * sin(t * 5)))
             r.put("body", "dog_sit")
             r.put("head", howl ? "dog_head_howl" : "dog_head_open", dx: -7, dy: 6,
                   rot: howl ? 0.55 + 0.04 * sin(t * 9) : 0.04 * sin(t * 1.3))
         default:
-            let moving = abs(dogTarget - dogX) >= 2 && [.wander, .follow, .chase, .fetchBack, .comeToMe, .wreck, .nap].contains(dogMode)
+            let moving = abs(dogTarget - dogX) >= 2 && [.wander, .follow, .chase, .fetchBack, .comeToMe, .wreck, .nap, .toFire].contains(dogMode)
             let run = moving && (dogRunning || dogRunningZoomies)
             let amp: CGFloat = moving ? (run ? 0.55 : 0.3) : 0
             let ss = moving ? s : 0
@@ -1560,7 +1645,7 @@ enum PalsShape {
         if t > blinkUntil + 3.5 && CGFloat.random(in: 0...1) < 0.01 { blinkUntil = t + 0.13 }
         let blink = t < blinkUntil
         switch meMode {
-        case .sit, .nap:
+        case .sit, .nap, .byFire:
             let asleep = meMode == .nap
             r.put("armBack", "me_arm_back", dy: -14, rot: 0.5)
             r.put("legBack", "me_sit_legs")
@@ -1568,7 +1653,7 @@ enum PalsShape {
             r.put("head", asleep || blink ? "me_head_sleep" : "me_head_open", dy: -14, rot: asleep ? -0.12 : 0)
             r.put("armFront", "me_arm_front", dy: -14, rot: 0.9)
         default:
-            let walking = meMode == .walk
+            let walking = meMode == .walk || meMode == .toFire
             let amp: CGFloat = walking ? 0.45 : 0
             let ss = walking ? s : 0
             let bob = abs(ss) * 1.2
@@ -1651,6 +1736,280 @@ enum PalsShape {
     }
 }
 
+// MARK: - Campfire and Christmas tree artwork (same sticker style as the characters)
+
+extension PalsArt {
+    static let treeLights: [(CGFloat, CGFloat)] = [(-24, -14), (-10, -19), (6, -18), (22, -13), (-17, -39), (-3, -42),
+                                                   (13, -40), (-11, -63), (4, -65), (12, -60), (-6, -84), (5, -82)]
+
+    /// A path moved to (tx, ty) and turned by rot
+    static func moved(_ p: CGPath, _ tx: CGFloat, _ ty: CGFloat, _ rot: CGFloat) -> CGPath {
+        var t = CGAffineTransform(translationX: tx, y: ty).rotated(by: rot)
+        return p.copy(using: &t) ?? p
+    }
+
+    static func fireBase(_ p: PalsPainter) {
+        let stone = palsRGB(150, 154, 162), stoneDark = palsRGB(118, 122, 132)
+        let log = palsRGB(122, 78, 46), logEnd = palsRGB(196, 150, 104), ring = palsRGB(150, 104, 66)
+        for x in [-19.0, -9.0, 9.0, 19.0] as [CGFloat] {
+            let s = ell(x, -2.6, 6, 3.6)
+            p.blob([s], stone)
+            p.clipped([s], [ell(x + 1, -0.2, 6, 2)], stoneDark)
+        }
+        for (a, x) in [(-0.32, -2.0), (0.32, 2.0)] as [(CGFloat, CGFloat)] {
+            p.blob([moved(rr(-15, -3.4, 15, 3.4, 3.4), x, -5, a)], log)
+            p.stroke(moved(path { $0.m(-9, -0.6); $0.l(6, -0.6) }, x, -5, a), ring, 0.9)
+            let e: CGFloat = a < 0 ? 15 : -15
+            p.blob([moved(ell(e, 0, 2.4, 3.4), x, -5, a)], logEnd)
+            p.stroke(moved(ell(e, 0, 1.2, 1.8), x, -5, a), ring, 0.6)
+        }
+    }
+
+    /// One flame layer; it flickers by being stretched and swayed around its base at (0, -6)
+    static func flame(_ p: PalsPainter, w: CGFloat, h: CGFloat, _ color: CGColor, outline: Bool) {
+        let f = path { $0.m(0, -6); $0.c(-w * 1.15, -6, -w, -6 - h * 0.45, -w * 0.15, -6 - h)
+                       $0.c(-w * 0.1, -6 - h * 0.7, w * 0.55, -6 - h * 0.6, w * 0.45, -6 - h * 0.78)
+                       $0.c(w * 1.2, -6 - h * 0.4, w * 1.1, -6, 0, -6); $0.z() }
+        p.blob([f], color, outline: outline)
+    }
+
+    static func starPath(_ cx: CGFloat, _ cy: CGFloat, _ R: CGFloat, _ r: CGFloat) -> CGPath {
+        path { pth in
+            for i in 0..<10 {
+                let a = -CGFloat.pi / 2 + CGFloat(i) * .pi / 5
+                let rad = i % 2 == 0 ? R : r
+                let pt = CGPoint(x: cx + rad * cos(a), y: cy + rad * sin(a))
+                if i == 0 { pth.move(to: pt) } else { pth.addLine(to: pt) }
+            }
+            pth.closeSubpath()
+        }
+    }
+
+    static func tier(_ b: CGFloat, _ t: CGFloat, _ w: CGFloat) -> CGPath {
+        path { $0.m(0, t); $0.c(w * 0.35, t + (b - t) * 0.3, w * 0.8, b - 7, w, b)
+               $0.c(w * 0.55, b + 5, -w * 0.55, b + 5, -w, b)
+               $0.c(-w * 0.8, b - 7, -w * 0.35, t + (b - t) * 0.3, 0, t); $0.z() }
+    }
+
+    static func tree(_ p: PalsPainter) {
+        let green = palsRGB(58, 150, 92), greenDark = palsRGB(38, 116, 70), snow = palsRGB(252, 252, 255)
+        p.blob([rr(-5, -16, 5, 0, 2)], palsRGB(122, 78, 46))                                    // trunk
+        for (b, t, w) in [(-12.0, -50.0, 30.0), (-36.0, -72.0, 24.0), (-58.0, -92.0, 17.0)] as [(CGFloat, CGFloat, CGFloat)] {
+            let sh = [tier(b, t, w)]
+            p.blob(sh, green)
+            p.clipped(sh, [ell(0, b + 2, w * 1.1, 6)], greenDark)
+            p.clipped(sh, [ell(-w * 0.45, t + (b - t) * 0.55, w * 0.32, 2.2, 0.5),
+                           ell(w * 0.5, t + (b - t) * 0.62, w * 0.28, 2, -0.5)], snow)        // snow on the branches
+        }
+        let red = palsRGB(214, 52, 62), gold = palsRGB(242, 192, 62), blue = palsRGB(80, 142, 230)
+        let baubles: [(CGFloat, CGFloat, CGColor)] = [(-16, -20, red), (12, -24, gold), (-4, -34, blue), (18, -16, blue),
+                                                      (-12, -45, gold), (9, -49, red), (-2, -62, red), (8, -70, blue), (-7, -76, gold)]
+        for (x, y, col) in baubles {
+            p.blob([ell(x, y, 2.4, 2.4)], col)
+            p.dot(x - 0.8, y - 0.8, 0.7, palsRGB(255, 255, 255, 0.85))
+        }
+        p.blob([starPath(0, -96, 8.5, 3.8)], palsRGB(255, 206, 64))
+    }
+
+    static func buildScenery() -> [String: PalsPart] {
+        let ink = PalsInk(PalsRecipe())
+        var parts: [String: PalsPart] = [:]
+        parts["fire_base"] = render(pivot: .zero, ink: ink) { fireBase($0) }
+        parts["flame_outer"] = render(pivot: CGPoint(x: 0, y: -6), ink: ink) { flame($0, w: 11, h: 30, palsRGB(242, 122, 40), outline: true) }
+        parts["flame_mid"] = render(pivot: CGPoint(x: 0, y: -6), ink: ink) { flame($0, w: 7.5, h: 21, palsRGB(255, 190, 60), outline: false) }
+        parts["flame_core"] = render(pivot: CGPoint(x: 0, y: -6), ink: ink) { flame($0, w: 4.2, h: 12, palsRGB(255, 238, 160), outline: false) }
+        parts["fire_glow"] = render(pivot: CGPoint(x: 0, y: -14), ink: ink) { $0.glow(0, -14, 40, palsRGB(255, 178, 76), 0.35) }
+        parts["tree"] = render(pivot: .zero, ink: ink) { tree($0) }
+        return parts
+    }
+}
+
+// MARK: - Campfire and Christmas tree on the ground
+
+extension Companions {
+    func setupScenery() {
+        let parts = PalsArt.buildScenery()
+        func sprite(_ name: String) -> SKSpriteNode {
+            let n = SKSpriteNode()
+            if let p = parts[name] {
+                n.texture = p.tex
+                n.size = p.size
+                n.anchorPoint = p.anchor
+                n.position = p.base
+            }
+            return n
+        }
+        fireGlow = sprite("fire_glow")
+        fireGlow.zPosition = -0.3
+        fireNode.addChild(fireGlow)
+        for (i, name) in ["flame_outer", "flame_mid", "flame_core"].enumerated() {
+            let f = sprite(name)
+            f.zPosition = CGFloat(i) * 0.01
+            flames.append(f)
+            fireNode.addChild(f)
+        }
+        let logs = sprite("fire_base")
+        logs.zPosition = 0.05
+        fireNode.addChild(logs)
+        let treeSprite = sprite("tree")
+        treeNode.addChild(treeSprite)
+        if let tex = scene.tex {
+            for _ in 0..<3 {
+                let e = SKSpriteNode(texture: tex)
+                e.size = CGSize(width: 4, height: 4)
+                e.color = NSColor(calibratedRed: 1, green: 0.6, blue: 0.25, alpha: 1)
+                e.colorBlendFactor = 1
+                e.zPosition = 0.1
+                embers.append(e)
+                fireNode.addChild(e)
+            }
+            starGlow = SKSpriteNode(texture: tex)
+            starGlow.size = CGSize(width: 36, height: 36)
+            starGlow.color = NSColor(calibratedRed: 1, green: 0.85, blue: 0.3, alpha: 1)
+            starGlow.colorBlendFactor = 1
+            starGlow.position = CGPoint(x: 0, y: 96)
+            starGlow.zPosition = -0.05
+            treeNode.addChild(starGlow)
+            for (i, (x, y)) in PalsArt.treeLights.enumerated() {
+                let l = SKSpriteNode(texture: tex)
+                l.size = CGSize(width: 10, height: 10)
+                l.color = LightString.colors[i % LightString.colors.count]
+                l.colorBlendFactor = 1
+                l.position = CGPoint(x: x, y: -y)
+                l.zPosition = 0.1
+                treeLights.append(l)
+                treeNode.addChild(l)
+            }
+        }
+        fireNode.zPosition = 6.58      // between you and the beagle
+        treeNode.zPosition = 6.45      // behind everyone
+        scene.world.addChild(fireNode)
+        scene.world.addChild(treeNode)
+        let w = scene.size.width
+        treeX = openSpot(near: w * 0.85, range: w * 0.1)
+        fireX = openSpot(near: w * 0.6, range: w * 0.12)
+        nextCampfire = scene.t + rnd(60, 120)        // the first campfire comes soon so you get to see it
+        setFire(fireOn)
+        setTree(treeOn)
+    }
+
+    func setFire(_ on: Bool) {
+        fireOn = on
+        UserDefaults.standard.set(on, forKey: "campfire")
+        fireNode.isHidden = !on
+        if !on && inCampfire { endCampfire(scene.t) }
+    }
+
+    func setTree(_ on: Bool) {
+        treeOn = on
+        UserDefaults.standard.set(on, forKey: "xmasTree")
+        treeNode.isHidden = !on
+    }
+
+    func updateScenery(_ t: CGFloat) {
+        let w = scene.size.width
+        if t > propsCheck {
+            propsCheck = t + 3
+            // move them if a window or the Dock now covers their spot
+            if !visible(treeX) { treeX = openSpot(near: w * 0.85, range: w * 0.4) }
+            if !visible(fireX) || abs(fireX - treeX) < 70 {
+                let nx = openSpot(near: w * 0.6, range: w * 0.35)
+                if visible(nx) && abs(nx - treeX) >= 70 {
+                    fireX = nx
+                    if inCampfire { endCampfire(t) }
+                }
+            }
+        }
+        if treeOn {
+            treeNode.position = CGPoint(x: treeX, y: groundY(treeX))
+            treeNode.isHidden = !onOpenGround(treeX)
+            if !treeNode.isHidden {
+                for (i, l) in treeLights.enumerated() { l.alpha = 0.55 + 0.45 * sin(t * 2.3 + CGFloat(i) * 1.7) }
+                starGlow.alpha = 0.45 + 0.15 * sin(t * 1.6)
+            }
+        }
+        guard fireOn else { return }
+        fireNode.position = CGPoint(x: fireX, y: groundY(fireX))
+        fireNode.isHidden = !onOpenGround(fireX)
+        guard !fireNode.isHidden, flames.count == 3 else { return }
+        // flicker: each flame layer sways and stretches at its own pace; it burns low while you nap
+        fireDim += ((napping ? 0.55 : 1) - fireDim) * 0.03
+        let s1 = sin(t * 7.3), s2 = sin(t * 11.1 + 1), s3 = sin(t * 9.4 + 2)
+        flames[0].zRotation = 0.07 * s1
+        flames[0].yScale = fireDim * (1 + 0.08 * s2)
+        flames[0].xScale = fireDim * (1 - 0.03 * s2)
+        flames[1].zRotation = -0.08 * s2
+        flames[1].yScale = fireDim * (1 + 0.10 * s3)
+        flames[1].xScale = fireDim
+        flames[2].zRotation = 0.09 * s3
+        flames[2].yScale = fireDim * (1 + 0.12 * s1)
+        flames[2].xScale = fireDim
+        fireGlow.alpha = (0.75 + 0.15 * sin(t * 5.2)) * fireDim
+        for (i, e) in embers.enumerated() {
+            let k = (t * 0.45 + CGFloat(i) / 3).truncatingRemainder(dividingBy: 1)
+            e.position = CGPoint(x: 6 * sin(t * 1.3 + CGFloat(i) * 2) + CGFloat(i - 1) * 4, y: 26 + k * 40)
+            e.alpha = (1 - k) * fireDim
+        }
+        // the fire melts the snow around it, and any snowball that rolls into it
+        if t > meltAt {
+            meltAt = t + 0.4
+            if let g = scene.ground, let c0 = g.col(at: fireX - 26), let c1 = g.col(at: fireX + 26), c0 <= c1 {
+                for c in c0...c1 where g.h[c] > 1.5 {
+                    g.h[c] = max(1.5, g.h[c] - 3)
+                    g.dirty = true
+                }
+            }
+        }
+        for b in scene.balls where !b.falling && !b.dragging && b.pile === scene.ground && abs(b.x - fireX) < b.r + 16 {
+            meltBall(b)
+            break
+        }
+    }
+
+    func meltBall(_ b: Snowball) {
+        for _ in 0..<6 {
+            scene.spawnClump(at: CGPoint(x: b.x + rnd(-b.r, b.r), y: b.y), vel: CGVector(dx: rnd(-50, 50), dy: rnd(60, 140)), sourceID: -3)
+        }
+        b.node.removeFromParent()
+        scene.balls.removeAll { $0 === b }
+    }
+
+    func fireRect() -> CGRect { CGRect(x: fireX - 24, y: fireNode.position.y, width: 48, height: 46) }
+
+    func fireClickable(_ m: CGPoint) -> Bool { fireOn && !fireNode.isHidden && fireRect().contains(m) }
+
+    // Campfire time: you both walk over, sit on either side, the beagle curls up, then you wander off again
+
+    func checkCampfire(_ t: CGFloat) {
+        if inCampfire {
+            if t > campfireEnds || !fireOn { endCampfire(t) }
+            return
+        }
+        guard fireOn, t > nextCampfire, !napping, dogFree, toy == nil, onOpenGround(fireX),
+              meMode == .idle || meMode == .sit || meMode == .walk else { return }
+        startCampfire(t)
+    }
+
+    func startCampfire(_ t: CGFloat) {
+        dropToy()
+        chaseBall = nil
+        inCampfire = true
+        campfireEnds = t + rnd(120, 180)
+        fireSide = meX < fireX ? -1 : 1
+        meMode = .toFire
+        meTarget = clampX(fireX + fireSide * 34)
+        dogMode = .toFire
+        dogTarget = clampX(fireX - fireSide * 42)
+    }
+
+    func endCampfire(_ t: CGFloat) {
+        inCampfire = false
+        nextCampfire = t + rnd(600, 1200)
+        if meMode == .toFire || meMode == .byFire { meMode = .idle; meUntil = t + rnd(2, 4) }
+        if dogMode == .toFire || dogMode == .byFire { newWanderTarget() }
+    }
+}
+
 // MARK: - Scene
 
 final class SnowScene: SKScene {
@@ -1688,6 +2047,10 @@ final class SnowScene: SKScene {
     // The menu reaches the companions through these, like it does for the fairy lights
     var palsEnabled: Bool { pals?.enabled ?? true }
     func setPals(_ on: Bool) { pals?.setEnabled(on) }
+    var campfireOn: Bool { pals?.fireOn ?? false }
+    func setCampfire(_ on: Bool) { pals?.setFire(on) }
+    var xmasTreeOn: Bool { pals?.treeOn ?? false }
+    func setXmasTree(_ on: Bool) { pals?.setTree(on) }
 
     override func didMove(to view: SKView) {
         backgroundColor = .clear
@@ -1709,6 +2072,10 @@ final class SnowScene: SKScene {
         for b in balls where b.pile === ground { b.drop(vel: .zero) }
         ground?.remove()
         ground = Pile(minX: 0, topY: 0, width: size.width, maxH: Cfg.groundPileMax, parent: world)
+        if let g = ground {
+            for c in 0..<g.count { g.h[c] = g.caps[c] * Cfg.groundStart * (0.85 + 0.15 * sin(CGFloat(c) * 0.07)) }
+            g.dirty = true
+        }
     }
 
     func clearAll() {
@@ -2466,7 +2833,7 @@ final class SnowScene: SKScene {
                 } }
                 // Finally the bottom of the screen
                 if !gone, let g = ground, let c = g.col(at: p.x), p.y < g.surface(c) {
-                    if !g.occ[c] { g.add(at: c, amount: f.isClump ? 1.6 : f.size * 0.12) }
+                    if !g.occ[c] { g.add(at: c, amount: f.isClump ? 1.6 : f.size * 0.2) }
                     gone = true
                 }
             }
@@ -2513,6 +2880,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var pauseItem: NSMenuItem!
     var lightsItem: NSMenuItem!
     var palsItem: NSMenuItem!
+    var fireItem: NSMenuItem!
+    var treeItem: NSMenuItem!
     var amountItems: [NSMenuItem] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -2597,6 +2966,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         palsItem.state = scene.palsEnabled ? .on : .off
         menu.addItem(palsItem)
 
+        fireItem = NSMenuItem(title: "Campfire 🔥", action: #selector(toggleCampfire), keyEquivalent: "")
+        fireItem.target = self
+        fireItem.state = scene.campfireOn ? .on : .off
+        menu.addItem(fireItem)
+
+        treeItem = NSMenuItem(title: "Christmas Tree 🎄", action: #selector(toggleTree), keyEquivalent: "")
+        treeItem.target = self
+        treeItem.state = scene.xmasTreeOn ? .on : .off
+        menu.addItem(treeItem)
+
         lightsItem = NSMenuItem(title: "Fairy Lights ✨", action: #selector(toggleLights), keyEquivalent: "l")
         lightsItem.target = self
         lightsItem.state = scene.lightsOn ? .on : .off
@@ -2646,9 +3025,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ⛄  Build a snowman: stack three snowballs
         🪟  Make snow fly: drag a window
         ✨  Hang fairy lights: ❄︎ menu → Fairy Lights
-        🐶  Pet the beagle: click it (click twice quickly to make it howl)
-        🙋  Call the beagle over: click yourself
-        ⛄  Watch out: the beagle can't resist a fresh snowman
+        🐶  Pet your pet: click it (click twice quickly to make it howl)
+        🙋  Call your pet over: click yourself
+        🔥  Campfire time: click the fire and you both come sit by it
+        ⛄  Watch out: your pet can't resist a fresh snowman
 
         Find everything under the ❄︎ in your menu bar. To get snow on the Dock too, allow this app in System Settings → Privacy & Security → Accessibility.
         """
@@ -2660,6 +3040,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func togglePals() {
         scene.setPals(!scene.palsEnabled)
         palsItem.state = scene.palsEnabled ? .on : .off
+    }
+
+    @objc func toggleCampfire() {
+        scene.setCampfire(!scene.campfireOn)
+        fireItem.state = scene.campfireOn ? .on : .off
+    }
+
+    @objc func toggleTree() {
+        scene.setXmasTree(!scene.xmasTreeOn)
+        treeItem.state = scene.xmasTreeOn ? .on : .off
     }
 
     @objc func toggleLights() {
