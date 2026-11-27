@@ -1685,6 +1685,10 @@ final class SnowScene: SKScene {
     static let dockID = -2
     var pals: Companions?                        // you and your beagle
 
+    // The menu reaches the companions through these, like it does for the fairy lights
+    var palsEnabled: Bool { pals?.enabled ?? true }
+    func setPals(_ on: Bool) { pals?.setEnabled(on) }
+
     override func didMove(to view: SKView) {
         backgroundColor = .clear
         tex = makeFlakeTexture()
@@ -2588,9 +2592,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         amount.submenu = sub
         menu.addItem(amount)
 
-        palsItem = NSMenuItem(title: "Beagle & Me 🐶", action: #selector(togglePals), keyEquivalent: "b")
+        palsItem = NSMenuItem(title: "Pet & Me 🐶", action: #selector(togglePals), keyEquivalent: "b")
         palsItem.target = self
-        palsItem.state = (scene.pals?.enabled ?? true) ? .on : .off
+        palsItem.state = scene.palsEnabled ? .on : .off
         menu.addItem(palsItem)
 
         lightsItem = NSMenuItem(title: "Fairy Lights ✨", action: #selector(toggleLights), keyEquivalent: "l")
@@ -2654,9 +2658,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func togglePals() {
-        guard let pals = scene.pals else { return }
-        pals.setEnabled(!pals.enabled)
-        palsItem.state = pals.enabled ? .on : .off
+        scene.setPals(!scene.palsEnabled)
+        palsItem.state = scene.palsEnabled ? .on : .off
     }
 
     @objc func toggleLights() {
