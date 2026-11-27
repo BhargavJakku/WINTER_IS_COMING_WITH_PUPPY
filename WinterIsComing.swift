@@ -38,6 +38,66 @@ enum Cfg {
     static let dockGain: CGFloat = 3.0       // snow landing on the Dock counts this many times more, so it builds up
 }
 
+/// Performance profiles (❄︎ menu → Performance): frame rate and how often window positions are checked
+enum PerfProfile: Int, CaseIterable {
+    case batterySaver, balanced, highQuality
+    var title: String { ["Battery Saver", "Balanced", "High Quality"][rawValue] }
+    var fps: Int { [20, 30, 60][rawValue] }
+    var poll: Double { [1.0 / 6.0, 1.0 / 15.0, 1.0 / 30.0][rawValue] }
+}
+
+extension Cfg {
+    static var profile = PerfProfile(rawValue: UserDefaults.standard.object(forKey: "perfProfile") as? Int ?? 1) ?? .balanced
+    static var reduceMotion = UserDefaults.standard.bool(forKey: "reduceMotion")
+    /// Frame rate while you're around, and while napping / in Low Power Mode
+    static var activeFPS: Int { reduceMotion ? min(30, profile.fps) : profile.fps }
+    static var ecoFPS: Int { max(15, activeFPS / 2) }
+    static var activePoll: Double { profile.poll }
+    static var ecoPoll: Double { max(profile.poll, 1.0 / 8.0) }
+    /// Reduce Motion also thins out the snowfall
+    static var flakeTarget: Int { reduceMotion ? min(targetFlakes, 120) : targetFlakes }
+}
+
+/// Wind moods, ported from 251701054/WINTER-IS-COMMING-VER2 (MIT): the wind drifts between a gentle breeze,
+/// a moderate wind and short strong gusts. During a strong gust you and your pet bundle up.
+enum WindRegime: String, CaseIterable {
+    case gentleBreeze = "Gentle Breeze"
+    case moderateWind = "Moderate Wind"
+    case strongGust = "Strong Gust"
+
+    var amplitudeScale: CGFloat {
+        switch self {
+        case .gentleBreeze: return 0.45
+        case .moderateWind: return 1.00
+        case .strongGust: return 2.15
+        }
+    }
+
+    var steadyBiasRange: ClosedRange<CGFloat> {
+        switch self {
+        case .gentleBreeze: return -6...6
+        case .moderateWind: return -18...18
+        case .strongGust: return -42...42
+        }
+    }
+
+    var verticalLiftFactor: CGFloat {
+        switch self {
+        case .gentleBreeze: return 0.0
+        case .moderateWind: return 0.08
+        case .strongGust: return 0.22
+        }
+    }
+
+    var durationRange: ClosedRange<CGFloat> {
+        switch self {
+        case .gentleBreeze: return 10...18
+        case .moderateWind: return 8...15
+        case .strongGust: return 4...8
+        }
+    }
+}
+
 // MARK: - Find the Dock (needs Accessibility permission)
 
 @MainActor final class DockTracker {
@@ -487,10 +547,6 @@ enum Pals {
     static let snowmanGrace: CGFloat = 6      // seconds to admire a snowman before the beagle knocks it over
     static let howlWindow: CGFloat = 0.45     // a second click on the beagle within this time makes it howl
     static let napAfter: CGFloat = 60         // no mouse movement for this long: nap + lower frame rate
-    static let activeFPS = 60
-    static let ecoFPS = 30                    // frame rate while napping or in Low Power Mode
-    static let activePoll = 1.0 / 30.0        // how often window positions are checked while active (s)
-    static let ecoPoll = 1.0 / 8.0            // ... and while napping
     static let fetchEvery: ClosedRange<CGFloat> = 35...70   // seconds between your snowball throws
 }
 
@@ -654,6 +710,19 @@ final class PalsPainter {
     }
 
     /// Eyes: "open" (dot with a shine), "happy" (^ ^) or "closed" (sleepy curve)
+    func clippedStroke(_ clip: [CGPath], _ p: CGPath, _ color: CGColor, _ width: CGFloat) {
+        guard let c = ctx else { return }
+        c.saveGState()
+        for s in clip { c.addPath(s) }
+        c.clip()
+        c.addPath(p)
+        c.setStrokeColor(color)
+        c.setLineWidth(width)
+        c.setLineCap(.round)
+        c.strokePath()
+        c.restoreGState()
+    }
+
     func eyes(_ pts: [(CGFloat, CGFloat)], _ kind: String, r: CGFloat) {
         for (x, y) in pts {
             switch kind {
@@ -923,6 +992,12 @@ enum PalsShape {
         add("me_arm_front", shoulderFront) { meArm($0, shoulderFront, front: true) }
         for kind in ["open", "happy", "sleep", "call"] { add("me_head_" + kind, meNeck) { meHead($0, kind) } }
         add("me_sit_legs", .zero) { meSitLegs($0) }
+        // windy-day outfits
+        add("me_scarf", .zero) { meScarf($0) }
+        add("me_scarf_tail", CGPoint(x: -6, y: -44.5)) { meScarfTail($0) }
+        add("dog_body_sweater", .zero) { dogBodySweater($0) }
+        add("dog_sit_sweater", .zero) { dogSitSweater($0) }
+        add("dog_sleep_sweater", .zero) { dogSleepSweater($0, blaze: r.blaze) }
         return parts
     }
 }
@@ -1077,12 +1152,14 @@ struct Presence {
     var campfireEnds: CGFloat = 0
     var dogFireSince: CGFloat = 0
     var fireSide: CGFloat = 1            // which side of the fire you sit on (the beagle takes the other)
+    var bundled = false                  // scarf and sweater on (during strong gusts)
+    var calmSince: CGFloat = -1
 
     init(scene: SnowScene) {
         self.scene = scene
         let parts = PalsArt.build(PalsRecipe())
         dog = PalsRig(parts: parts, slots: ["farBack", "farFront", "tail", "body", "nearBack", "nearFront", "head"])
-        me = PalsRig(parts: parts, slots: ["armBack", "legBack", "legFront", "torso", "head", "armFront"])
+        me = PalsRig(parts: parts, slots: ["scarfTail", "armBack", "legBack", "legFront", "torso", "scarf", "head", "armFront"])
         dog.root.zPosition = 6.6
         me.root.zPosition = 6.55
         scene.world.addChild(me.root)
@@ -1186,6 +1263,7 @@ struct Presence {
         updateDog(dt, t)
         checkSnowman(t)
         checkCampfire(t)
+        updateOutfits(t)
         // settle onto the snow surface
         dogY += (groundY(dogX) - dogY) * min(1, dt * 10)
         meY += (groundY(meX) - meY) * min(1, dt * 10)
@@ -1396,7 +1474,7 @@ struct Presence {
             dogMode = .follow
         } else {
             newWanderTarget()
-            dogRunningZoomies = CGFloat.random(in: 0...1) < 0.2
+            dogRunningZoomies = !Cfg.reduceMotion && CGFloat.random(in: 0...1) < 0.2   // no zoomies with Reduce Motion
         }
     }
 
@@ -1599,11 +1677,24 @@ struct Presence {
             powerCheck = t + 5
             lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
         }
-        let wantEco = napping || lowPower
-        if wantEco != eco {
-            eco = wantEco
-            scene.view?.preferredFramesPerSecond = eco ? Pals.ecoFPS : Pals.activeFPS
-            Cfg.pollInterval = eco ? Pals.ecoPoll : Pals.activePoll
+        // Frame rate and window checks follow the Performance menu, lower while napping or in Low Power Mode
+        eco = napping || lowPower
+        let fps = eco ? Cfg.ecoFPS : Cfg.activeFPS
+        if let v = scene.view, v.preferredFramesPerSecond != fps { v.preferredFramesPerSecond = fps }
+        let poll = eco ? Cfg.ecoPoll : Cfg.activePoll
+        if Cfg.pollInterval != poll { Cfg.pollInterval = poll }
+    }
+
+    /// A strong gust: you put on your scarf and your pet gets its sweater; off again once it has been calm a while
+    func updateOutfits(_ t: CGFloat) {
+        if scene.windRegime == .strongGust {
+            calmSince = -1
+            if !bundled {
+                bundled = true
+                if !napping { say("Brrr! 🧣", over: .me) }
+            }
+        } else if bundled {
+            if calmSince < 0 { calmSince = t } else if t - calmSince > 20 { bundled = false }
         }
     }
 
@@ -1643,13 +1734,13 @@ struct Presence {
         let jumping = t < jumpUntil
         switch dogMode {
         case .nap where abs(dogTarget - dogX) < 2:
-            r.put("body", "dog_sleep", yScale: 1 + 0.025 * sin(t * 2.2))
+            r.put("body", bundled ? "dog_sleep_sweater" : "dog_sleep", yScale: 1 + 0.025 * sin(t * 2.2))
         case .byFire where t - dogFireSince > 10:
-            r.put("body", "dog_sleep", yScale: 1 + 0.025 * sin(t * 2.2))    // dozing off by the fire
+            r.put("body", bundled ? "dog_sleep_sweater" : "dog_sleep", yScale: 1 + 0.025 * sin(t * 2.2))    // dozing off by the fire
         case .sit, .howl, .byFire:
             let howl = dogMode == .howl
             r.put("tail", "dog_tail", dx: 6, dy: -16, rot: 1.25 + (howl ? 0 : 0.12 * sin(t * 5)))
-            r.put("body", "dog_sit")
+            r.put("body", bundled ? "dog_sit_sweater" : "dog_sit")
             r.put("head", howl ? "dog_head_howl" : "dog_head_open", dx: -7, dy: 6,
                   rot: howl ? 0.55 + 0.04 * sin(t * 9) : 0.04 * sin(t * 1.3))
         default:
@@ -1668,7 +1759,7 @@ struct Presence {
             r.put("farBack", "dog_far_back", dy: bob, rot: -ss * amp - tuck)
             r.put("farFront", "dog_far_front", dy: bob, rot: ss * amp + tuck)
             r.put("tail", "dog_tail", dy: bob, rot: wag)
-            r.put("body", "dog_body", dy: bob)
+            r.put("body", bundled ? "dog_body_sweater" : "dog_body", dy: bob)
             r.put("nearBack", "dog_near_back", dy: bob, rot: ss * amp - tuck)
             r.put("nearFront", "dog_near_front", dy: bob, rot: -ss * amp + tuck)
             let head: String
@@ -1692,6 +1783,10 @@ struct Presence {
             r.put("armBack", "me_arm_back", dy: -14, rot: 0.5)
             r.put("legBack", "me_sit_legs")
             r.put("torso", "me_torso", dy: -14 + (asleep ? 0.4 * sin(t * 2) : 0))
+            if bundled {
+                r.put("scarfTail", "me_scarf_tail", dy: -14, rot: scarfFlap(t))
+                r.put("scarf", "me_scarf", dy: -14)
+            }
             r.put("head", asleep || blink ? "me_head_sleep" : "me_head_open", dy: -14, rot: asleep ? -0.12 : 0)
             r.put("armFront", "me_arm_front", dy: -14, rot: 0.9)
         default:
@@ -1719,10 +1814,20 @@ struct Presence {
             r.put("legBack", "me_back_leg", rot: -ss * amp)
             r.put("legFront", "me_front_leg", rot: ss * amp)
             r.put("torso", "me_torso", dy: bob)
+            if bundled {
+                r.put("scarfTail", "me_scarf_tail", dy: bob, rot: scarfFlap(t))
+                r.put("scarf", "me_scarf", dy: bob)
+            }
             r.put("head", head, dy: bob, rot: walking ? 0.03 * ss : 0)
             r.put("armFront", "me_arm_front", dy: bob, rot: armFront)
         }
         r.end()
+    }
+
+    /// The scarf's tail flapping in the wind
+    func scarfFlap(_ t: CGFloat) -> CGFloat {
+        let k: CGFloat = Cfg.reduceMotion ? 0.35 : 1
+        return k * (0.12 * sin(t * 11) + 0.05 * sin(t * 17 + 1))
     }
 
     // MARK: Speech bubbles and hearts
@@ -2048,7 +2153,7 @@ extension Companions {
             if !treeNode.isHidden {
                 // each bulb twinkles at its own pace: dim → bright, with a little pulse
                 for i in 0..<treeLights.count {
-                    let k = 0.5 + 0.5 * sin(t * lightSpeed[i] + lightPhase[i])
+                    let k = 0.5 + 0.5 * sin(t * lightSpeed[i] * (Cfg.reduceMotion ? 0.4 : 1) + lightPhase[i])
                     let b = k * k
                     treeLights[i].alpha = 0.12 + 0.88 * b
                     treeLights[i].setScale(0.75 + 0.45 * b)
@@ -2071,7 +2176,8 @@ extension Companions {
         guard !fireNode.isHidden, flames.count == 3 else { return }
         // flicker: each flame layer sways and stretches at its own pace; it burns low while you nap
         fireDim += ((napping ? 0.55 : 1) - fireDim) * 0.03
-        let s1 = sin(t * 7.3), s2 = sin(t * 11.1 + 1), s3 = sin(t * 9.4 + 2)
+        let calm: CGFloat = Cfg.reduceMotion ? 0.4 : 1
+        let s1 = sin(t * 7.3 * calm) * calm, s2 = sin(t * 11.1 * calm + 1) * calm, s3 = sin(t * 9.4 * calm + 2) * calm
         flames[0].zRotation = 0.07 * s1
         flames[0].yScale = fireDim * (1 + 0.08 * s2)
         flames[0].xScale = fireDim * (1 - 0.03 * s2)
@@ -2155,6 +2261,201 @@ extension Companions {
     }
 }
 
+// MARK: - Gust outfits and snowman styles (same sticker style)
+
+/// The snowman looks a new snowman can get (one is picked at random)
+enum SnowmanStyle: CaseIterable { case classic, cozy, earmuffs, santa, cap, wizard }
+
+extension PalsArt {
+    // --- you: a striped scarf for windy days, its tail flaps in the wind
+    static let scarfRed = palsRGB(200, 44, 52), scarfStripe = palsRGB(250, 246, 240)
+
+    static func meScarf(_ p: PalsPainter) {
+        let sh = [rr(-8.5, -48.6, 12, -42.6, 3)]
+        p.blob(sh, scarfRed)
+        for x in [-5.0, 0.0, 5.0, 10.0] as [CGFloat] { p.clipped(sh, [rr(x, -50, x + 1.6, -42, 0.5)], scarfStripe) }
+    }
+
+    static func meScarfTail(_ p: PalsPainter) {
+        let t = path { $0.m(-6, -46.5); $0.c(-12, -46.5, -16, -44.5, -24, -45.5); $0.l(-24.5, -41)
+                       $0.c(-16, -40, -12, -42, -6, -42.5); $0.z() }
+        p.blob([t], scarfRed)
+        for k in [0.35, 0.7] as [CGFloat] {
+            let x = -6 - 18 * k
+            p.clipped([t], [rr(x - 0.8, -52, x + 0.8, -38, 0.4)], scarfStripe)
+        }
+    }
+
+    // --- the beagle: a red knit sweater with green stripes and little snowflakes
+    static func sweater(_ p: PalsPainter, clip: [CGPath], x0: CGFloat, x1: CGFloat, y0: CGFloat, y1: CGFloat,
+                        stripes: [CGFloat], flakeY: CGFloat, flakeXs: [CGFloat], edges: [CGFloat], band: CGPath) {
+        let knit = palsRGB(186, 36, 46), green = palsRGB(36, 120, 64), white = palsRGB(250, 246, 240)
+        p.clipped(clip, [rr(x0, y0, x1, y1, 2)], knit)
+        for y in stripes { p.clipped(clip, [rr(x0, y, x1, y + 2.2, 0.8)], green) }
+        for x in flakeXs {
+            for k in 0..<6 {
+                let a = CGFloat(k) * .pi / 3
+                p.stroke(path { $0.m(x, flakeY); $0.l(x + 2.6 * cos(a), flakeY + 2.6 * sin(a)) }, white, 0.7)
+            }
+            p.dot(x, flakeY, 0.7, white)
+        }
+        for x in edges { p.clippedStroke(clip, path { $0.m(x, y0 - 3); $0.l(x, y1 + 3) }, p.ink.line, 1.2) }
+        p.blob([band], green)
+    }
+
+    static func dogBodySweater(_ p: PalsPainter) {
+        dogBody(p)
+        sweater(p, clip: [ell(0, -24, 24, 11.5), ell(15, -23, 11.5, 11), ell(-16, -23, 10.5, 10.5)],
+                x0: -9, x1: 21, y0: -37, y1: -12, stripes: [-31, -17], flakeY: -24, flakeXs: [-2, 6, 14],
+                edges: [-9], band: rr(18.5, -37.5, 22.5, -13, 2))
+    }
+
+    static func dogSitSweater(_ p: PalsPainter) {
+        dogSit(p)
+        sweater(p, clip: [ell(-6, -12.5, 13, 12.5), ell(9, -24, 11.5, 15), ell(-1, -18, 12, 12)],
+                x0: -8, x1: 17, y0: -40, y1: -19, stripes: [-35, -24], flakeY: -29.5, flakeXs: [-2, 6, 13],
+                edges: [-8], band: rr(15, -40, 19, -19, 2))
+    }
+
+    static func dogSleepSweater(_ p: PalsPainter, blaze: Bool) {
+        dogSleep(p, blaze: blaze)
+        sweater(p, clip: [ell(-2, -11, 25, 10.5)],
+                x0: -14, x1: 5, y0: -22, y1: -4, stripes: [-18, -9], flakeY: -13.5, flakeXs: [-8, 0],
+                edges: [-14], band: rr(3.5, -22, 7, -4, 1.5))
+    }
+
+    // --- snowmen: drawn around the ball's center for a head of radius 12.5 / body of radius 16,
+    //     then redrawn at the real size
+    static let smR: CGFloat = 12.5, smB: CGFloat = 16
+    static let coal = palsRGB(30, 28, 30), carrot = palsRGB(246, 133, 33), twig = palsRGB(107, 71, 41)
+    static let smRed = palsRGB(209, 41, 46), smBlack = palsRGB(42, 40, 46), smBand = palsRGB(196, 40, 52)
+    static let smGold = palsRGB(242, 192, 62), smGreen = palsRGB(48, 140, 84), smBlue = palsRGB(70, 124, 204)
+    static let smCream = palsRGB(250, 244, 228), smPink = palsRGB(240, 130, 160), smPurple = palsRGB(112, 76, 176)
+    static let smBrown = palsRGB(150, 98, 52), smWhite = palsRGB(252, 252, 255), smGrey = palsRGB(130, 132, 140)
+    static let smYellow = palsRGB(250, 214, 70)
+
+    /// mood: smile, grin, o, none · eyes: coal, wink, happy
+    static func smFace(_ p: PalsPainter, mood: String, eyes: String) {
+        let R = smR
+        switch eyes {
+        case "wink":
+            p.dot(-R * 0.3, -R * 0.22, R * 0.09, coal)
+            p.stroke(path { $0.m(R * 0.2, -R * 0.2); $0.c(R * 0.27, -R * 0.3, R * 0.36, -R * 0.3, R * 0.42, -R * 0.2) }, coal, 1.1)
+        case "happy":
+            for sx in [-1.0, 1.0] as [CGFloat] {
+                let x = sx * R * 0.3
+                p.stroke(path { $0.m(x - R * 0.11, -R * 0.17); $0.c(x - R * 0.05, -R * 0.3, x + R * 0.05, -R * 0.3, x + R * 0.11, -R * 0.17) }, coal, 1.1)
+            }
+        default:
+            for sx in [-1.0, 1.0] as [CGFloat] { p.dot(sx * R * 0.3, -R * 0.22, R * 0.09, coal) }
+        }
+        p.blob([path { $0.m(0, -R * 0.06); $0.l(R * 0.72, R * 0.03); $0.l(0, R * 0.13); $0.z() }], carrot)
+        switch mood {
+        case "smile":
+            for k in 0..<5 {
+                let a = CGFloat.pi * (0.2 + 0.15 * CGFloat(k))
+                p.dot(cos(a) * R * 0.42, sin(a) * R * 0.42 + R * 0.05, R * 0.05, coal)
+            }
+        case "grin":
+            p.blob([path { $0.m(-R * 0.32, R * 0.3); $0.c(-R * 0.2, R * 0.62, R * 0.2, R * 0.62, R * 0.32, R * 0.3); $0.z() }], coal, outline: false)
+            p.blob([ell(0, R * 0.46, R * 0.14, R * 0.07)], smPink, outline: false)
+        case "o":
+            p.blob([ell(0, R * 0.42, R * 0.1, R * 0.13)], coal, outline: false)
+        default: break
+        }
+    }
+
+    static func smScarf(_ p: PalsPainter, _ col: CGColor, stripe: CGColor? = nil) {
+        let R = smR
+        let sh = [rr(-R * 0.85, R * 0.7, R * 0.85, R * 1.0, R * 0.12)]
+        p.blob(sh, col)
+        p.blob([rr(R * 0.3, R * 0.85, R * 0.58, R * 1.6, R * 0.08)], col)
+        if let s = stripe {
+            for k in -2...2 {
+                let x = CGFloat(k) * R * 0.32
+                p.clipped(sh, [rr(x - 0.6, R * 0.6, x + 0.6, R * 1.1, 0.3)], s)
+            }
+        }
+    }
+
+    static func snowmanHead(_ p: PalsPainter, _ style: SnowmanStyle) {
+        let R = smR
+        switch style {
+        case .classic:
+            smScarf(p, smRed)
+            smFace(p, mood: "smile", eyes: "coal")
+            p.blob([rr(-R * 0.95, -R * 0.95, R * 0.95, -R * 0.75, R * 0.08)], smBlack)
+            let crown = rr(-R * 0.6, -R * 1.9, R * 0.6, -R * 0.85, R * 0.1)
+            p.blob([crown], smBlack)
+            p.clipped([crown], [rr(-R, -R * 1.12, R, -R * 0.95, 0)], smBand)
+        case .cozy:
+            smScarf(p, smGreen, stripe: smCream)
+            smFace(p, mood: "smile", eyes: "happy")
+            p.blob([ell(0, -R * 1.5, R * 0.35, R * 0.33)], smCream)
+            p.blob([path { $0.m(-R * 0.95, -R * 0.5); $0.c(-R * 0.95, -R * 1.65, R * 0.95, -R * 1.65, R * 0.95, -R * 0.5); $0.z() }], smRed)
+            p.blob([rr(-R, -R * 0.75, R, -R * 0.4, R * 0.15)], smCream)
+        case .earmuffs:
+            smScarf(p, smBlue, stripe: smWhite)
+            smFace(p, mood: "o", eyes: "coal")
+            p.stroke(path { $0.m(-R * 0.95, -R * 0.1); $0.c(-R * 0.9, -R * 1.4, R * 0.9, -R * 1.4, R * 0.95, -R * 0.1) }, smGrey, 1.4)
+            for sx in [-1.0, 1.0] as [CGFloat] { p.blob([ell(sx * R * 0.95, -R * 0.1, R * 0.28, R * 0.34)], smPink) }
+        case .santa:
+            p.blob([path { $0.m(-R * 0.75, R * 0.15); $0.c(-R * 0.6, R * 1.2, R * 0.6, R * 1.2, R * 0.75, R * 0.15); $0.z() }], smCream)
+            smFace(p, mood: "none", eyes: "happy")
+            p.blob([path { $0.m(-R * 0.9, -R * 0.55); $0.c(-R * 0.6, -R * 1.7, R * 0.5, -R * 1.9, R * 1.3, -R * 1.3)
+                           $0.l(R * 0.9, -R * 0.55); $0.z() }], smRed)
+            p.blob([ell(R * 1.35, -R * 1.25, R * 0.22, R * 0.22)], smCream)
+            p.blob([rr(-R, -R * 0.75, R, -R * 0.4, R * 0.15)], smCream)
+        case .cap:
+            smScarf(p, smYellow)
+            smFace(p, mood: "grin", eyes: "wink")
+            p.blob([ell(-R * 1.05, -R * 0.62, R * 0.55, R * 0.16)], smBlue)                 // brim, worn backwards
+            p.blob([path { $0.m(-R * 0.9, -R * 0.55); $0.c(-R * 0.9, -R * 1.45, R * 0.9, -R * 1.45, R * 0.9, -R * 0.55); $0.z() }], smBlue)
+            p.dot(0, -R * 1.2, R * 0.08, smWhite)
+        case .wizard:
+            smFace(p, mood: "o", eyes: "happy")
+            p.blob([path { $0.m(-R * 1.1, -R * 0.6); $0.l(R * 0.3, -R * 2.6); $0.l(R * 1.1, -R * 0.6); $0.z() }], smPurple)
+            p.blob([ell(0, -R * 0.62, R * 1.25, R * 0.2)], smPurple)
+            p.blob([starPath(-R * 0.05, -R * 1.2, R * 0.25, R * 0.11), starPath(R * 0.35, -R * 1.85, R * 0.18, R * 0.08)], smGold)
+        }
+    }
+
+    static func snowmanBody(_ p: PalsPainter, _ style: SnowmanStyle) {
+        let B = smB
+        let hands: (String, String) = style == .cozy ? ("mitten", "mitten") : (style == .wizard ? ("stick", "broom") : ("stick", "stick"))
+        for (sx, kind) in [(-1.0, hands.0), (1.0, hands.1)] as [(CGFloat, String)] {
+            let x1 = sx * B * 1.75, y1 = -B * 0.65
+            p.stroke(path { $0.m(sx * B * 0.85, -B * 0.15); $0.l(x1, y1) }, twig, max(1.2, B * 0.09))
+            p.stroke(path { $0.m(sx * B * 1.4, -B * 0.45); $0.l(sx * B * 1.55, -B * 0.85) }, twig, max(1.2, B * 0.09))
+            if kind == "mitten" {
+                p.blob([ell(x1, y1, B * 0.2, B * 0.17)], smRed)
+                p.blob([ell(x1 - sx * B * 0.12, y1 - B * 0.12, B * 0.08, B * 0.1)], smRed)
+            } else if kind == "broom" {
+                p.stroke(path { $0.m(x1, y1 + B * 0.6); $0.l(x1, y1 - B * 1.1) }, smBrown, 1.6)
+                p.blob([path { $0.m(x1 - B * 0.3, y1 - B * 1.1); $0.l(x1 + B * 0.3, y1 - B * 1.1)
+                               $0.l(x1 + B * 0.45, y1 - B * 1.7); $0.l(x1 - B * 0.45, y1 - B * 1.7); $0.z() }], smYellow)
+            }
+        }
+        let goldButtons = style == .santa || style == .wizard
+        for k in 0..<3 {
+            let y = -B * (0.35 - 0.33 * CGFloat(k))
+            if goldButtons { p.blob([ell(0, y, B * 0.08, B * 0.08)], smGold) } else { p.dot(0, y, B * 0.07, coal) }
+        }
+    }
+
+    /// The decoration for one ball of a snowman, drawn at that ball's real size
+    static func snowmanDecor(_ style: SnowmanStyle, head: Bool, radius r: CGFloat) -> SKSpriteNode {
+        let ink = PalsInk(PalsRecipe())
+        let part = render(pivot: .zero, ink: ink, scale: r / (head ? smR : smB)) { p in
+            if head { snowmanHead(p, style) } else { snowmanBody(p, style) }
+        }
+        let n = SKSpriteNode(texture: part.tex)
+        n.size = part.size
+        n.anchorPoint = part.anchor
+        return n
+    }
+}
+
 // MARK: - Scene
 
 final class SnowScene: SKScene {
@@ -2190,6 +2491,15 @@ final class SnowScene: SKScene {
     var speckTex: SKTexture?
     static let dockID = -2
     var pals: Companions?                        // you and your beagle
+    // wind moods
+    var windRegime: WindRegime = .moderateWind
+    var windTimer: CGFloat = 10
+    var currentWindScale: CGFloat = 1.0
+    var targetWindScale: CGFloat = 1.0
+    var currentWindBias: CGFloat = 0.0
+    var targetWindBias: CGFloat = 0.0
+    var currentWindLift: CGFloat = 0.0
+    var targetWindLift: CGFloat = 0.0
 
     // The menu reaches the companions through these, like it does for the fairy lights
     /// Called when you switch Spaces or swipe between full-screen apps
@@ -2318,7 +2628,7 @@ final class SnowScene: SKScene {
 
     override func update(_ currentTime: TimeInterval) {
         if lastT == 0 { lastT = currentTime }
-        let dt = CGFloat(min(currentTime - lastT, 1.0 / 20.0))
+        let dt = CGFloat(min(currentTime - lastT, 1.0 / 12.0))   // allows the low frame rates of Battery Saver / napping
         lastT = currentTime
         t += dt
         pollAcc += dt
@@ -2492,76 +2802,17 @@ final class SnowScene: SKScene {
         }
     }
 
-    /// Three stacked balls become a snowman: face and scarf on the head, buttons and stick arms on the body
+    /// Three stacked balls become a snowman, dressed in one of the styles at random
     func makeSnowman(_ st: [Snowball]) {
         let body = st[1], head = st[2]
         removeDecor(stackOf: head)
-        let R = head.r
-
-        let h = SKNode()
+        let style = SnowmanStyle.allCases.randomElement() ?? .classic
+        let h = PalsArt.snowmanDecor(style, head: true, radius: head.r)
         h.zPosition = 0.5
-        for sx in [-1.0, 1.0] as [CGFloat] {
-            let eye = SKShapeNode(circleOfRadius: max(1, R * 0.09))
-            eye.fillColor = NSColor(calibratedWhite: 0.08, alpha: 1)
-            eye.strokeColor = .clear
-            eye.position = CGPoint(x: sx * R * 0.3, y: R * 0.22)
-            h.addChild(eye)
-        }
-        let nose = CGMutablePath()
-        nose.move(to: CGPoint(x: R * 0.02, y: R * 0.06))
-        nose.addLine(to: CGPoint(x: R * 0.75, y: -R * 0.04))
-        nose.addLine(to: CGPoint(x: R * 0.02, y: -R * 0.12))
-        nose.closeSubpath()
-        let carrot = SKShapeNode(path: nose)
-        carrot.fillColor = NSColor(calibratedRed: 0.96, green: 0.52, blue: 0.13, alpha: 1)
-        carrot.strokeColor = .clear
-        h.addChild(carrot)
-        for k in 0..<5 {
-            let a = CGFloat.pi * (1.2 + 0.15 * CGFloat(k))
-            let dot = SKShapeNode(circleOfRadius: max(0.7, R * 0.05))
-            dot.fillColor = NSColor(calibratedWhite: 0.1, alpha: 1)
-            dot.strokeColor = .clear
-            dot.position = CGPoint(x: cos(a) * R * 0.42, y: sin(a) * R * 0.42 - R * 0.05)
-            h.addChild(dot)
-        }
-        let red = NSColor(calibratedRed: 0.82, green: 0.16, blue: 0.18, alpha: 1)
-        let scarf = SKShapeNode(rect: CGRect(x: -R * 0.85, y: -R * 0.98, width: R * 1.7, height: R * 0.3),
-                                cornerRadius: R * 0.12)
-        scarf.fillColor = red
-        scarf.strokeColor = .clear
-        h.addChild(scarf)
-        let tail = SKShapeNode(rect: CGRect(x: R * 0.3, y: -R * 1.55, width: R * 0.28, height: R * 0.7),
-                               cornerRadius: R * 0.08)
-        tail.fillColor = red
-        tail.strokeColor = .clear
-        tail.zRotation = -0.15
-        h.addChild(tail)
         head.node.addChild(h)
         head.decor = h
-
-        let B = body.r
-        let bd = SKNode()
+        let bd = PalsArt.snowmanDecor(style, head: false, radius: body.r)
         bd.zPosition = 0.5
-        for k in 0..<3 {
-            let btn = SKShapeNode(circleOfRadius: max(0.8, B * 0.07))
-            btn.fillColor = NSColor(calibratedWhite: 0.08, alpha: 1)
-            btn.strokeColor = .clear
-            btn.position = CGPoint(x: 0, y: B * (0.35 - 0.33 * CGFloat(k)))
-            bd.addChild(btn)
-        }
-        let brown = NSColor(calibratedRed: 0.42, green: 0.28, blue: 0.16, alpha: 1)
-        for sx in [-1.0, 1.0] as [CGFloat] {
-            let arm = CGMutablePath()
-            arm.move(to: CGPoint(x: sx * B * 0.85, y: B * 0.15))
-            arm.addLine(to: CGPoint(x: sx * B * 1.75, y: B * 0.65))
-            arm.move(to: CGPoint(x: sx * B * 1.4, y: B * 0.45))
-            arm.addLine(to: CGPoint(x: sx * B * 1.55, y: B * 0.85))
-            let stick = SKShapeNode(path: arm)
-            stick.strokeColor = brown
-            stick.lineWidth = max(1.2, B * 0.09)
-            stick.lineCap = .round
-            bd.addChild(stick)
-        }
         body.node.addChild(bd)
         body.decor = bd
         pals?.snowmanBuilt(st[0])               // ...the beagle has plans for it
@@ -2953,9 +3204,31 @@ final class SnowScene: SKScene {
         }
     }
 
-    func stepFlakes(_ dt: CGFloat) {
+    /// The wind drifts between moods and blends smoothly from one to the next (from WINTER-IS-COMMING-VER2)
+    func stepWind(_ dt: CGFloat) -> (wind: CGFloat, lift: CGFloat) {
+        windTimer -= dt
+        if windTimer <= 0 {
+            let roll = CGFloat.random(in: 0...1)
+            var next: WindRegime = roll < 0.40 ? .gentleBreeze : (roll < 0.78 ? .moderateWind : .strongGust)
+            if Cfg.reduceMotion { next = .gentleBreeze }
+            windRegime = next
+            windTimer = CGFloat.random(in: next.durationRange)
+            targetWindScale = next.amplitudeScale
+            targetWindBias = CGFloat.random(in: next.steadyBiasRange)
+            targetWindLift = next.verticalLiftFactor
+        }
+        let blend = min(1, dt * 0.45)
+        currentWindScale += (targetWindScale - currentWindScale) * blend
+        currentWindBias += (targetWindBias - currentWindBias) * blend
+        currentWindLift += (targetWindLift - currentWindLift) * blend
         // A few sines at different frequencies add up to gusty wind
-        let wind = 14 * sin(t * 0.11) + 9 * sin(t * 0.37 + 1.3) + 6 * sin(t * 0.9 + 0.4)
+        let baseWave = 14 * sin(t * 0.11) + 9 * sin(t * 0.37 + 1.3) + 6 * sin(t * 0.9 + 0.4)
+        let gustRipple = 8 * sin(t * 1.45 + 0.7) * max(0, currentWindScale - 1.0)
+        return (baseWave * currentWindScale + currentWindBias + gustRipple, currentWindLift)
+    }
+
+    func stepFlakes(_ dt: CGFloat) {
+        let (wind, windLift) = stepWind(dt)
         var normal = 0
         var i = flakes.count - 1
         while i >= 0 {
@@ -2971,7 +3244,8 @@ final class SnowScene: SKScene {
             } else {
                 let sway = sin(t * f.swayFreq + f.phase) * f.swayAmp
                 p.x += (wind * f.windFactor + sway) * dt
-                p.y += f.vel.dy * dt
+                let gustSlowdown = 1.0 - min(0.30, windLift * f.windFactor * min(1.0, abs(wind) / 60.0))
+                p.y += (f.vel.dy * gustSlowdown) * dt   // strong gusts hold the flakes up a little
                 if p.x < -40 { p.x += size.width + 80 } else if p.x > size.width + 40 { p.x -= size.width + 80 }
             }
 
@@ -3023,7 +3297,7 @@ final class SnowScene: SKScene {
         }
 
         // Top up flakes (max 6 per frame so they don't appear in a row)
-        let deficit = min(6, Cfg.targetFlakes - normal)
+        let deficit = min(6, Cfg.flakeTarget - normal)
         if deficit > 0 { for _ in 0..<deficit { spawnFlake() } }
     }
 }
@@ -3047,6 +3321,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var pauseItem: NSMenuItem!
     var lightsItem: NSMenuItem!
     var palsItem: NSMenuItem!
+    var perfItems: [NSMenuItem] = []
+    var reduceItem: NSMenuItem!
     var fireItem: NSMenuItem!
     var treeItem: NSMenuItem!
     var amountItems: [NSMenuItem] = []
@@ -3140,6 +3416,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         amount.submenu = sub
         menu.addItem(amount)
 
+        let perf = NSMenuItem(title: "Performance", action: nil, keyEquivalent: "")
+        let psub = NSMenu()
+        for prof in PerfProfile.allCases {
+            let it = NSMenuItem(title: prof.title, action: #selector(setProfile(_:)), keyEquivalent: "")
+            it.target = self
+            it.tag = prof.rawValue
+            it.state = prof == Cfg.profile ? .on : .off
+            psub.addItem(it)
+            perfItems.append(it)
+        }
+        perf.submenu = psub
+        menu.addItem(perf)
+
+        reduceItem = NSMenuItem(title: "Reduce Motion", action: #selector(toggleReduceMotion), keyEquivalent: "")
+        reduceItem.target = self
+        reduceItem.state = Cfg.reduceMotion ? .on : .off
+        menu.addItem(reduceItem)
+        menu.addItem(.separator())
+
         palsItem = NSMenuItem(title: "Pet & Me 🐶", action: #selector(togglePals), keyEquivalent: "b")
         palsItem.target = self
         palsItem.state = scene.palsEnabled ? .on : .off
@@ -3160,6 +3455,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lightsItem.state = scene.lightsOn ? .on : .off
         menu.addItem(lightsItem)
 
+        menu.addItem(.separator())
         let clear = NSMenuItem(title: "Clear Snow", action: #selector(clearSnow), keyEquivalent: "c")
         clear.target = self
         menu.addItem(clear)
@@ -3182,6 +3478,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.orderFrontRegardless()
             pauseItem.title = "Pause Snow"
         }
+    }
+
+    @objc func setProfile(_ sender: NSMenuItem) {
+        Cfg.profile = PerfProfile(rawValue: sender.tag) ?? .balanced
+        UserDefaults.standard.set(sender.tag, forKey: "perfProfile")
+        for it in perfItems { it.state = (it === sender) ? .on : .off }
+    }
+
+    @objc func toggleReduceMotion() {
+        Cfg.reduceMotion.toggle()
+        UserDefaults.standard.set(Cfg.reduceMotion, forKey: "reduceMotion")
+        reduceItem.state = Cfg.reduceMotion ? .on : .off
     }
 
     @objc func setAmount(_ sender: NSMenuItem) {
